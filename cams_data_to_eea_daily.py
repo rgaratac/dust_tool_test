@@ -1490,12 +1490,13 @@ def main() -> pd.DataFrame:
         time_col="day",
         year=YEAR,
     )
+    neighbor_MA = int (Basline_MA_days / 2)
     result = run_deduction_for_pollutant(
         df,
         year=YEAR,
         pollutant=POLLUTANT,
         dust_threshold=cams_dust_threshold,
-        neighbor_n=Basline_MA_days,
+        neighbor_n= neighbor_MA,
     )
     output = deduction_parquet_path(
         persistent_dir, POLLUTANT, dataset, EEA_temporal_flag, YEAR, Basline_MA_days
