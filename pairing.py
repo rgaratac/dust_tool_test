@@ -278,10 +278,10 @@ def resolve_method(station_class: str, paired_rb_id, paired_ub_id, requested=Non
 # ---------------------------------------------------------------------------
 
 def default_pairing(stations: pd.DataFrame, limits: PairingLimits = PairingLimits()) -> pd.DataFrame:
-    """Nearest suitable RB for every station, nearest UB for every TH station.
+    """Nearest suitable RB for every station; a TH without RB gets the nearest UB.
 
-    An RB station is its own reference (distance 0), so its Option 1 load is
-    also subtracted at the RB itself.
+    Each station has at most one reference. An RB station is its own reference
+    (distance 0), so its Option 1 load is also subtracted at the RB itself.
     """
     st = stations.reset_index(drop=True).copy()
     rb = st[st["class"] == "RB"]
@@ -291,8 +291,10 @@ def default_pairing(stations: pd.DataFrame, limits: PairingLimits = PairingLimit
         st[st["class"] != "RB"], rb,
         limits.max_rb_distance_km, limits.max_rb_altitude_diff_m, limits.same_country,
     )
+    has_rb = rb_pair.index[rb_pair["ref_id"].notna()]
+    th_without_rb = st[(st["class"] == "TH") & ~st.index.isin(has_rb)]
     ub_pair = _nearest_reference(
-        st[st["class"] == "TH"], ub,
+        th_without_rb, ub,
         limits.max_ub_distance_km, limits.max_ub_altitude_diff_m, limits.same_country,
     )
 
@@ -330,6 +332,9 @@ def fill_pairing_metrics(table: pd.DataFrame, stations: pd.DataFrame) -> pd.Data
         out[col] = out["station_id"].map(st[col])
     out["paired_rb_id"] = _clean_ids(out["paired_rb_id"])
     out["paired_ub_id"] = _clean_ids(out["paired_ub_id"])
+    # One reference per station: an RB pair wins, and only TH stations use a UB pair.
+    drop_ub = out["paired_rb_id"].notna() | (out["class"] != "TH")
+    out.loc[drop_ub, "paired_ub_id"] = None
     out["paired_rb_name"] = out["paired_rb_id"].map(st["station_name"])
     out["paired_ub_name"] = out["paired_ub_id"].map(st["station_name"])
 

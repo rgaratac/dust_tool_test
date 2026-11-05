@@ -59,10 +59,10 @@ class DefaultPairingTest(unittest.TestCase):
         self.assertEqual(row["paired_rb_id"], "ES/RB_OK")
         self.assertEqual(row["rb_distance_km"], 0.0)
 
-    def test_th_gets_rb_and_ub(self):
+    def test_th_with_rb_has_no_ub(self):
         row = self.table.loc["ES/TH1"]
         self.assertEqual(row["paired_rb_id"], "ES/RB_OK")
-        self.assertEqual(row["paired_ub_id"], "ES/UB1")
+        self.assertIsNone(row["paired_ub_id"])
 
     def test_no_reference_within_distance(self):
         row = self.table.loc["ES/UB_ISLAND"]
@@ -73,6 +73,8 @@ class DefaultPairingTest(unittest.TestCase):
         limits = pr.PairingLimits(max_rb_distance_km=5)
         table = pr.default_pairing(self.stations, limits).set_index("station_id")
         self.assertEqual(table.loc["ES/TH1", "method"], "option2_ub_paired")
+        self.assertIsNone(table.loc["ES/TH1", "paired_rb_id"])
+        self.assertEqual(table.loc["ES/TH1", "paired_ub_id"], "ES/UB1")
         self.assertEqual(table.loc["ES/UB1", "method"], "option2")
 
     def test_manual_edit_and_reset(self):
