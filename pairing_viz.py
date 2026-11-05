@@ -339,8 +339,18 @@ def pairing_map_widget(session: PairingSession, *, countries=None, on_select=Non
         classes = [c for c, box in class_boxes.items() if box.value] + ["unknown"]
         return plot_station_pairing(session.table, list(country_box.value), classes)
 
+    class _MapFigureWidget(go.FigureWidget):
+        # Zoom/pan sends read-only 'map._derived' viewport keys that Plotly rejects.
+        def _perform_plotly_relayout(self, relayout_data):
+            if isinstance(relayout_data, dict):
+                relayout_data = {
+                    k: v for k, v in relayout_data.items()
+                    if not (k.split(".", 1)[0].startswith("map") and k.endswith("._derived"))
+                }
+            return super()._perform_plotly_relayout(relayout_data)
+
     try:
-        fig_widget = go.FigureWidget(_figure())
+        fig_widget = _MapFigureWidget(_figure())
     except Exception:
         fig_widget = None
     out = w.Output()
