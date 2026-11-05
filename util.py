@@ -548,6 +548,15 @@ def map_timeseries_clickable_plot(
 def until_check():
     return "util.py has been imported"
 
+
+def plot_station_pairing(pairing_table, countries=None, classes=None, static=False, **kwargs):
+    """Station pairing map: Plotly (default) or Cartopy (``static=True``). See pairing_viz.py."""
+    import pairing_viz
+
+    if static:
+        return pairing_viz.plot_station_pairing_static(pairing_table, countries, classes, **kwargs)
+    return pairing_viz.plot_station_pairing(pairing_table, countries, classes, **kwargs)
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt

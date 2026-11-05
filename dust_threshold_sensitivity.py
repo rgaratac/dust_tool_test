@@ -382,6 +382,91 @@ def run_sensitivity(
     return summary
 
 
+# ---------------------------------------------------------------------------
+# Model-specific threshold with the paired natural-contribution methods
+# ---------------------------------------------------------------------------
+
+def natural_threshold_sweep(
+    df: pd.DataFrame,
+    pairing: pd.DataFrame,
+    thresholds: list[float],
+    *,
+    params=None,
+    daily_limit: float | None = None,
+) -> dict[float, pd.DataFrame]:
+    """One natural-contribution table per CAMS dust threshold (event days change with it)."""
+    import natural_contribution as nc
+
+    params = params or nc.MethodParams()
+    return {
+        float(t): nc.compute_natural_contribution(
+            df, pairing, dust_threshold=float(t), params=params, daily_limit=daily_limit
+        )
+        for t in sorted(thresholds)
+    }
+
+
+def contribution_consistency(
+    frames: dict[float, pd.DataFrame],
+    *,
+    group_col: str = "country",
+    station_col: str = "Samplingpoint",
+) -> pd.DataFrame:
+    """Per group and threshold: CAMS dust days and the share with a contribution > 0.
+
+    ``group_col='country'`` is derived from the first two characters of the
+    station id when the column is missing. Any other column (e.g. a region)
+    must already be in the tables.
+    """
+    rows = []
+    for threshold, frame in frames.items():
+        work = frame.loc[frame["cams_dust_flag"] & ~frame["insufficient_reference"]].copy()
+        if group_col not in work.columns and group_col == "country":
+            work["country"] = work[station_col].astype(str).str[:2]
+        for group, sub in work.groupby(group_col, observed=True):
+            confirmed = sub["natural_contribution"] > 0
+            rows.append({
+                group_col: group,
+                "dust_threshold_ug_m3": threshold,
+                "cams_dust_days": int(len(sub)),
+                "confirmed_days": int(confirmed.sum()),
+                "share_confirmed": float(confirmed.mean()) if len(sub) else np.nan,
+                "median_contribution": float(sub["natural_contribution"].median()) if len(sub) else np.nan,
+            })
+    return pd.DataFrame(rows).sort_values([group_col, "dust_threshold_ug_m3"]).reset_index(drop=True)
+
+
+def lowest_consistent_threshold(
+    consistency: pd.DataFrame,
+    *,
+    group_col: str = "country",
+    min_share: float = 0.9,
+    min_days: int = 10,
+) -> pd.DataFrame:
+    """Lowest threshold from which every higher threshold has ``share_confirmed >= min_share``.
+
+    Thresholds with fewer than ``min_days`` CAMS dust days are ignored. The
+    result is NaN for a group where no threshold qualifies.
+    """
+    rows = []
+    for group, sub in consistency.groupby(group_col):
+        sub = sub[sub["cams_dust_days"] >= min_days].sort_values("dust_threshold_ug_m3")
+        best = np.nan
+        ok = (sub["share_confirmed"] >= min_share).to_numpy()
+        for i in range(len(sub)):
+            if ok[i:].all():
+                best = float(sub["dust_threshold_ug_m3"].iloc[i])
+                break
+        share = sub.loc[sub["dust_threshold_ug_m3"] == best, "share_confirmed"]
+        rows.append({
+            group_col: group,
+            "model_threshold_ug_m3": best,
+            "share_confirmed_at_threshold": float(share.iloc[0]) if len(share) else np.nan,
+            "thresholds_tested": int(len(sub)),
+        })
+    return pd.DataFrame(rows)
+
+
 def _parse_thresholds(text: str) -> list[float]:
     values = [float(part.strip()) for part in text.split(",") if part.strip()]
     if not values:

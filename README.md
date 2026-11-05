@@ -2,7 +2,7 @@
 
 This repository estimates how much of the particulate matter measured at European air-quality stations comes from natural Saharan and other desert dust, and subtracts that contribution from the measurements.
 
-The main workflow is the notebook `Dust_deduction_tool_full.ipynb` (the CAMS Natural Dust Service Tool). It supports the natural-source assessment in Article 16 of the Ambient Air Quality Directive (Directive (EU) 2024/2881): identifying where limit-value exceedances are attributable to natural sources, and removing that natural dust from reported concentrations. The method follows the European Commission (DG ENV) guidance on assessing natural dust contributions ([sec 2011-0208](https://data.consilium.europa.eu/doc/document/ST%206771%202011%20INIT/EN/pdf)). Days affected by dust are identified with the CAMS European air-quality interim reanalysis dust product, and the natural contribution is estimated from the station’s own measurements on neighbouring non-dust days.
+The main workflow is the notebook `Dust_deduction_tool_full.ipynb` (the CAMS Natural Dust Service Tool). It supports the natural-source assessment in Article 16 of the Ambient Air Quality Directive (Directive (EU) 2024/2881): identifying where limit-value exceedances are attributable to natural sources, and removing that natural dust from reported concentrations. The method follows the European Commission (DG ENV) guidance on assessing natural dust contributions ([sec 2011-0208](https://data.consilium.europa.eu/doc/document/ST%206771%202011%20INIT/EN/pdf)). Days affected by dust are identified with the CAMS European air-quality interim reanalysis dust product. Following the EU methodology for natural contributions, stations are classified as regional background (RB), urban background (UB) or traffic/industrial (TH), paired with nearby reference stations, and the natural load is quantified at the paired RB (Option 1) or by UB self-calibration (Option 2). Member States can inspect and edit the pairing on a map or as a CSV.
 
 Created by Jessie Zhang, TNO.
 
@@ -14,7 +14,7 @@ The notebook runs in six stages. The chart below is the hourly workflow, drawn f
 
 ### 1. Setup and parameters
 
-Section 1 installs `cartopy`, downloads `util.py` from this repository, and imports the helper functions.
+Section 1 installs `cartopy`, downloads any missing helper module (`util.py`, `cams_data_to_eea_daily.py`, `pairing.py`, `natural_contribution.py`, `pairing_viz.py`, `dust_threshold_sensitivity.py`) from `REPO_RAW_BASE`, and imports them.
 
 Section 2 is where you set the run:
 
@@ -36,12 +36,31 @@ Downloads and the heavy processing only need to run once. Later runs reuse the s
 | `COMPUTE_CAMS_DAILY` | `True` | `False` | Extracts the stored zips and rebuilds the daily CAMS product. `hour` writes a UTC daily grid. `day` rebuilds the per-station local-day table; monthly station caches are still reused |
 | `LOAD_PARQUET_DATA` | `False` | `True` | Loads the saved daily-results Parquet file and skips recomputation. Turned off automatically when `DOWNLOAD_EEA`, `DOWNLOAD_CAMS`, or `COMPUTE_CAMS_DAILY` is True |
 
-Thresholds in the next cell:
+Thresholds, limit values and method parameters in the next cell:
 
-* `CAMS_dust_threshold` (default **5 µg/m³**): a day is a dust day when CAMS dust at the station is above this value.
-* `POLLUTANT_daily_threshold`: daily limit used for an exceedance. The notebook sets **50 µg/m³ for PM10** and **25 µg/m³ for PM2.5**.
-* `Station_Temporal_coverage` (default **65%**): minimum share of days in the selected year required to keep a station.
-* `Basline_MA_days` (default **6**): number of neighbouring non-dust days, before the day and again after it, used for the background concentration.
+| Parameter | Default | Meaning |
+|---|---|---|
+| `CAMS_dust_threshold` | 5 µg/m³ | A day is a natural-event (dust) day when CAMS dust at the station is above this value |
+| `PM10_DAILY_LIMIT` | 45 µg/m³ | Daily PM10 limit (Directive (EU) 2024/2881). Set 50 for the previous limit |
+| `PM25_DAILY_LIMIT` | 25 µg/m³ | Daily PM2.5 limit |
+| `PM10_ANNUAL_LIMIT` | 20 µg/m³ | Annual PM10 limit |
+| `PM25_ANNUAL_LIMIT` | 10 µg/m³ | Annual PM2.5 limit |
+| `Station_Temporal_coverage` | 65% | Minimum share of days in the selected year required to keep a station |
+| `Basline_MA_days` | 6 | Only used in output file names (`_MA6`) since the new methods |
+| `MAX_RB_DISTANCE_KM` | 100 | Maximum horizontal distance to a suitable regional background (RB) reference |
+| `MAX_RB_ALTITUDE_DIFF_M` | 500 | Maximum altitude difference to a suitable RB reference |
+| `MAX_UB_DISTANCE_KM` | 50 | Maximum distance between a traffic/industrial (TH) station and its urban background (UB) reference |
+| `PAIR_SAME_COUNTRY` | True | Only pair stations of the same country |
+| `USE_USER_PAIRING` | False | Use `station_pairing_user.csv` from the output folder instead of the default pairing |
+| `USER_PAIRING_FILE` | `station_pairing_user.csv` | Name of the edited pairing file. Use a different name per pollutant: sampling-point ids differ between PM10 and PM2.5 |
+| `REAPPLY_PAIRING_ON_LOAD` | True | With `LOAD_PARQUET_DATA`, recompute the deduction on the loaded table with the current pairing |
+| `OPTION1_HALF_WINDOW` | 15 | Option 1 reference window: d−15 … d+15 |
+| `OPTION2_HALF_WINDOW` | 3 | Option 2 reference window: d−3 … d+3, or 3 days before/after a multi-day episode |
+| `REFERENCE_PERCENTILE` | 50 | Percentile of the reference window |
+| `MIN_REFERENCE_DAYS_OPTION1` | 10 | Minimum valid reference days for Option 1 |
+| `MIN_REFERENCE_DAYS_OPTION2` | 3 | Minimum valid reference days for Option 2 |
+
+`POLLUTANT_daily_threshold` and `POLLUTANT_annual_threshold` are set from these limits for the selected `POLLUTANT`.
 
 ### 2. Input data
 
@@ -91,43 +110,79 @@ Intermediate files follow the notebook’s Drive layout (`/content/drive/MyDrive
 
 `<stations>` is a short hash of the station coordinates and time-zone offsets, so a different country list does not reuse the wrong cache. December of the previous year is included, because a positive offset reaches back into 31 December and the EEA request itself starts on 14 December.
 
-### 4. Dust deduction
+### 4. Station classification and pairing (notebook section 4.6)
 
-Each station-day receives two flags:
+Stations are classified from `Air Quality Station Type` and `Air Quality Station Area` in `DataExtract.csv`:
 
-* **Dust day** (`dust_flag`): CAMS dust at the station is above `CAMS_dust_threshold`.
-* **Exceedance** (`Exceedance`): the measured daily mean is above `POLLUTANT_daily_threshold`.
+| Class | Rule |
+|---|---|
+| RB, regional background | rural* area (`rural`, `rural-near_city`, `rural-regional`, `rural-remote`) and background type |
+| UB, urban background | urban or suburban area and background type |
+| TH, hotspot | traffic or industrial type |
 
-Days that are both a dust day and an exceedance are the candidates for subtracting natural dust. For those days the background is the median of neighbouring non-dust days: up to `Basline_MA_days` non-dust days before the day and the same number after it (`compute_station_baseline`).
+The default pairing (`pairing.default_pairing`) gives every non-RB station the nearest RB station of the same country within `MAX_RB_DISTANCE_KM` and `MAX_RB_ALTITUDE_DIFF_M`, and every TH station the nearest UB station within `MAX_UB_DISTANCE_KM`. An RB station is its own reference. Only stations with data in the run are candidates. The method follows from the pairing:
 
-On dust days the natural dust contribution is the measured concentration minus that background. The corrected concentration is the background. On all other days the measured concentration is kept. If the background is higher than the measurement, the contribution is negative; those values are set to zero. That can happen because the background is a median of surrounding days, and strong winds during a dust event can also lower local PM at some stations.
+| Method | When |
+|---|---|
+| `option1` | a suitable RB exists |
+| `option2` | UB station without suitable RB |
+| `option2_ub_paired` | TH station without suitable RB, with a paired UB |
+| `none` | no valid reference; nothing is subtracted |
+
+The pairing table has the columns `station_id, station_name, country, class, area, type, latitude, longitude, altitude, paired_rb_id, paired_rb_name, rb_distance_km, rb_altitude_diff_m, paired_ub_id, paired_ub_name, ub_distance_km, method, source, comment`. It is saved as `station_pairing_default.csv` in the output folder.
+
+**Map.** `pairing_viz.plot_station_pairing` (Plotly) and `pairing_viz.plot_station_pairing_static` (Cartopy) show every station coloured by class, a green line to its RB and a thinner orange (dashed in the static map) line from a TH station to its UB. Stations without a usable reference are grey. Hover text gives the id and name, class, area, altitude, paired stations, distance, altitude difference, method and whether the pairing is default or manual. The interactive version has country and class filters. `util.plot_station_pairing` wraps both.
+
+**Editing in Colab.** `pairing_viz.pairing_app` combines the map with a form: pick a station (click it or search by id or name), choose its RB and/or UB from candidates sorted by distance (with distance and altitude difference), or *none / force Option 2*, and press **Save**. The station is marked `source = manual`, distances and method are recomputed, the map redraws and the table is written to `station_pairing_user.csv`. **Reset station** and **Reset all** go back to the default.
+
+**Editing as CSV.** Export the table (downloaded automatically in Colab), edit `paired_rb_id`, `paired_ub_id`, `method` or `comment`, and upload it again or place it in the output folder as `station_pairing_user.csv`. On loading (`pairing.apply_user_pairing`), every id must exist and a paired RB/UB must really be an RB/UB, otherwise the file is rejected with a list of errors. Pairs beyond the distance or altitude limits only produce warnings. Names, distances and altitude differences are recomputed, changed stations are marked `manual`, and the changes against the default pairing are listed.
+
+The deduction always reads the current pairing table (`pairing_session.table`), so an edit made with the form or the CSV is used the next time section 6 runs, or when results are loaded with `REAPPLY_PAIRING_ON_LOAD`.
+
+### 5. Natural-contribution deduction (notebook section 6)
+
+Event days are the CAMS dust days (`cams_dust_flag`: CAMS dust above `CAMS_dust_threshold`). They are excluded from every reference window, not only the target day. The calculation (`natural_contribution.py`) uses the whole download period from 14 December of the previous year, then keeps the selected year.
+
+* **Option 1 (regional background, preferred).** At the paired RB station, for each event day *d*: window *d*−15 … *d*+15, event days removed, 50th percentile. Net natural load = max(RB(*d*) − reference, 0). The same daily load is subtracted at every station paired to that RB, including the RB itself.
+* **Option 2 (self-calibration).** For UB stations without a suitable RB: window *d*−3 … *d*+3 at the station, event days removed, 50th percentile. For a multi-day episode, the 3 days before its start and the 3 days after its end (without event days) are the reference for every day of the episode.
+* **TH stations** never self-calibrate. They use the Option 1 load of their RB or, without a suitable RB, the Option 2 load of their paired UB.
+
+With fewer valid reference days than `MIN_REFERENCE_DAYS_OPTION1` / `MIN_REFERENCE_DAYS_OPTION2`, the day is flagged `insufficient_reference` and nothing is subtracted.
+
+The contribution is subtracted on **every** event day, with or without an exceedance; other days get 0. `adjusted_value = measured − natural_contribution`, never below 0. A dust day is confirmed (`confirmed_dust_day`) only when the quantified contribution is > 0.
+
+New daily columns: `station_class`, `method`, `reference_station_id`, `reference_value`, `n_reference_days`, `natural_contribution`, `cams_dust_flag`, `confirmed_dust_day`, `adjusted_value`, `insufficient_reference`, `pairing_source`. The previous names are kept for the plots: `dust_flag` = `cams_dust_flag`, `pollutant_median` = `reference_value`, `Dust_contribution` = `natural_contribution`, `corrected_pollutant` = `adjusted_value`.
+
+**Model-specific dust threshold.** `dust_threshold_sensitivity.natural_threshold_sweep`, `contribution_consistency` and `lowest_consistent_threshold` recompute the deduction for a list of CAMS thresholds and report, per country or region, the lowest threshold from which the quantified contribution is > 0 on at least a given share of CAMS dust days. The notebook runs this in section 7.2.1 when `RUN_THRESHOLD_SWEEP = True`.
 
 An alternative formula that scales CAMS dust by the ratio of observed PM to CAMS PM is sketched in the notebook and left commented out. It is not used.
 
-### 5. Outputs
+### 6. Outputs
 
-When `LOAD_PARQUET_DATA` is `False`, the daily table for all stations is written as a Parquet file. With Google Drive the name is:
+When `LOAD_PARQUET_DATA` is `False`, the daily table for all stations is written as a Parquet file in the output folder (Google Drive or the project folder):
 
 `CAMS_dust_{POLLUTANT}_deduction_{dataset}_{EEA_temporal_flag}_{YEAR}_MA{Basline_MA_days}.parquet`
 
-Example: `CAMS_dust_PM10_deduction_E2a_hour_2025_MA6.parquet`. A later run with `LOAD_PARQUET_DATA = True` reads that same path and skips sections 3–6. With `USE_GOOGLE_DRIVE = False` the save cell writes `CAMS_dust_deduction_{dataset}_{EEA_temporal_flag}_{YEAR}.parquet` in the project folder (no pollutant name and no `MA` suffix), while the load cell looks for the longer name above.
+Example: `CAMS_dust_PM10_deduction_E2a_hour_2025_MA6.parquet`. A later run with `LOAD_PARQUET_DATA = True` reads that same path and skips sections 3–6. With `REAPPLY_PAIRING_ON_LOAD = True` the deduction is recomputed on the loaded table with the current pairing; that table covers only the selected year, so the first and last days have a shorter reference window.
 
-The daily rows are then summarised per station for the selected year:
+The adjusted daily series is summarised per station for the selected year (`natural_contribution.station_indicators`). Exceedances and annual means are recalculated from the daily values, with and without the natural contribution:
 
 | Column | Meaning |
 |---|---|
-| `Exceedance_days` | Days the measured concentration exceeds the limit |
-| `Dust_exceedance_days` | Exceedances that no longer exceed the limit after natural dust is subtracted |
-| `NonDust_exceedance` | Exceedances that remain after the subtraction |
-| `Average_pollutant` | Measured annual mean |
-| `Average_pollutant_dust_removed` | Annual mean after subtracting natural dust |
+| `station_class`, `method`, `reference_station_id`, `pairing_source` | Class, method and reference station used; default or manual pairing |
+| `cams_dust_days`, `confirmed_dust_days`, `insufficient_reference_days` | CAMS dust days, dust days with a contribution > 0, days without enough reference data |
+| `exceedances_measured`, `exceedances_adjusted` | Days above the daily limit before and after subtraction |
+| `exceedances_natural` | Exceedances attributed to natural sources |
+| `annual_mean_measured`, `annual_mean_adjusted` | Annual mean before and after subtraction |
+| `annual_limit_exceeded_measured`, `annual_limit_exceeded_adjusted` | Annual mean above the annual limit |
+| `Exceedance_days`, `Dust_exceedance_days`, `NonDust_exceedance`, `Average_pollutant`, `Average_pollutant_dust_removed` | Previous names, same meaning, used by the maps |
 
 The station summary is written as CSV in the output folder:
 
 * one country: `{country code}_station_annual_{POLLUTANT}_{dataset}_{EEA_temporal_flag}_{YEAR}_MA{Basline_MA_days}.csv` (for example `ES_station_annual_PM10_E2a_hour_2025_MA6.csv`)
 * two or more countries: `muti_countries_station_annual_...csv` (the prefix is spelled that way in the notebook)
 
-### 6. Visualisation
+### 7. Visualisation
 
 Interactive figures are aimed at Google Colab. If the widgets do not run (for example in VS Code or on an HPC node), use the static plots.
 
@@ -138,7 +193,25 @@ Interactive figures are aimed at Google Colab. If the widgets do not run (for ex
 
 ## Other Python files
 
-The notebook does not import these scripts, except `util.py`. Paths inside the standalone scripts still point at a TNO project directory unless you edit `project_dir`.
+The notebook downloads a helper module from `REPO_RAW_BASE` only when the file is not already next to the notebook, so local edits are kept. In Colab, point `REPO_RAW_BASE` at a public repository that contains `pairing.py`, `natural_contribution.py` and `pairing_viz.py`, or upload those files to the Colab session.
+
+### `pairing.py`
+
+Station classification (`classify_station`, `build_station_table`), default pairing (`default_pairing`, `PairingLimits`), method rules (`derive_method`, `resolve_method`), manual edits (`set_manual_pair`, `candidate_references`, `reset_station`, `reset_all`) and the CSV round trip (`export_pairing_csv`, `read_pairing_csv`, `apply_user_pairing`, `load_pairing`). Pure pandas/numpy.
+
+### `natural_contribution.py`
+
+Window selection (`reference_window`, `reference_for_days`, `episode_bounds`), the per-station net load (`station_net_load`), the deduction for all stations (`compute_natural_contribution`, `run_natural_deduction`), limit values (`LimitValues`), method parameters (`MethodParams`) and the station summary (`station_indicators`). Pure pandas/numpy.
+
+### `pairing_viz.py`
+
+Plotly and Cartopy pairing maps, `PairingSession` (the pairing table the deduction reads, with listeners that redraw the map), the ipywidgets map and editor (`pairing_app`), and Colab download/upload helpers.
+
+### Tests
+
+`python -m unittest discover -s tests` (with the repository root on `PYTHONPATH`). `tests/test_natural_pairing.py` covers window selection with excluded event days, multi-day episodes, pairing by distance and altitude, TH stations using the UB load, the annual mean over all dust days, the threshold helper and the pairing CSV round trip with validation errors.
+
+The remaining scripts are not imported by the notebook, except `util.py`, `cams_data_to_eea_daily.py` and, for section 7.2.1, `dust_threshold_sensitivity.py`. Paths inside the standalone scripts still point at a TNO project directory unless you edit `project_dir`.
 
 ### `util.py`
 
@@ -147,9 +220,10 @@ Shared helpers. The notebook downloads this file from the `main` branch at the s
 | Function | What it does |
 |---|---|
 | `until_check` | Returns a short string so you can see that the import worked |
+| `plot_station_pairing` | Pairing map from `pairing_viz.py`: Plotly by default, Cartopy with `static=True` |
 | `filter_daily_by_coverage` | Keeps every row for stations whose coverage in a reference year is at least `min_pct` (so days just outside that year remain available for the background window) |
 | `add_cams_daily_dust_by_station` | Interpolates a CAMS daily field to each station and attaches `cams_dust` |
-| `compute_station_baseline` | For dust days that are also exceedances, median of `neighbor_n` non-dust days before and after |
+| `compute_station_baseline` | Previous method: for dust days that are also exceedances, median of `neighbor_n` non-dust days before and after. No longer used by the notebook |
 | `plot_station_timeseries` | Measured vs corrected concentration and CAMS dust for one station |
 | `map_timeseries_clickable_plot` | ipyleaflet map; clicking a marker draws that station’s time series |
 | `plot_exceedance_maps_discrete` | Static Cartopy maps of station-summary columns |
