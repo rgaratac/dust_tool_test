@@ -34,7 +34,28 @@ class ExceedanceReportTest(unittest.TestCase):
         self.assertEqual(a["exceedances_natural"], 15)
         self.assertTrue(a["daily_lv_exceeded_measured"])
         self.assertFalse(a["daily_lv_exceeded_adjusted"])
-        self.assertEqual(a["status_change"], "daily LV met after deduction")
+        self.assertEqual(a["daily_lv_status"], "met after deduction")
+        # Annual mean 50 -> 38.75 with limit 40.
+        self.assertEqual(a["annual_lv_status"], "met after deduction")
+        self.assertEqual(a["overall_status"], "met after deduction")
+        self.assertEqual(a["status_change"], "daily and annual LV")
+        b = self.stations.set_index("Samplingpoint").loc["ES/B"]
+        self.assertEqual((b["overall_status"], b["status_change"]), ("met", ""))
+
+    def test_station_info_and_map(self):
+        daily = _daily().drop(columns=["station_class"])
+        daily["Samplingpoint"] = daily["Samplingpoint"] + " (UTC day)"
+        info = pd.DataFrame({"station_id": ["ES/A", "ES/B"], "class": ["TH", "RB"],
+                             "latitude": [40.0, 41.0], "longitude": [-3.0, -4.0]})
+        daily = er.add_station_info(daily, info)
+        stations = er.station_compliance(daily, daily_limit=45, annual_limit=40, allowed_exceedances=18)
+        a = stations.set_index("Samplingpoint").loc["ES/A (UTC day)"]
+        self.assertEqual((a["station_class"], a["Latitude"]), ("TH", 40.0))
+        try:
+            import cartopy  # noqa: F401
+        except ImportError:
+            self.skipTest("cartopy not installed")
+        er.plot_compliance_map(stations)
 
     def test_summary_and_class(self):
         summary = er.compliance_summary(self.stations).set_index("indicator")

@@ -10,6 +10,7 @@ hourly/daily table. Columns used: ``Samplingpoint``, ``day``, ``daily_mean``,
 from __future__ import annotations
 
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -23,6 +24,32 @@ DUST_FLAG = "dust_flag"
 MEASURED_COLOR = "#d62728"
 ADJUSTED_COLOR = "#1f77b4"
 NATURAL_COLOR = "#e6a23c"
+CLASS_COLORS = {"RB": "#2ca02c", "UB": "#1f77b4", "TH": "#d62728", "unknown": "#8c564b"}
+
+# The combined hourly/daily table labels each Samplingpoint with its clock.
+_CLOCK_SUFFIX = re.compile(r"\s+\((UTC day|station local day)\)$")
+
+
+def base_station_id(samplingpoint) -> str:
+    return _CLOCK_SUFFIX.sub("", str(samplingpoint))
+
+
+def add_station_info(daily: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
+    """Add ``station_class``, ``Latitude`` and ``Longitude`` from the pairing/station table.
+
+    ``stations`` needs ``station_id``, ``class``, ``latitude`` and ``longitude``.
+    """
+    out = daily.copy()
+    info = stations.drop_duplicates("station_id").set_index("station_id")
+    key = out[STATION].map(base_station_id)
+    for col, src in (("station_class", "class"), ("Latitude", "latitude"), ("Longitude", "longitude")):
+        mapped = key.map(info[src])
+        if col in out.columns:
+            current = out[col].replace("unknown", np.nan) if col == "station_class" else out[col]
+            out[col] = current.fillna(mapped)
+        else:
+            out[col] = mapped
+    return out
 
 
 def _prepare(daily: pd.DataFrame) -> pd.DataFrame:
@@ -69,15 +96,30 @@ def station_compliance(
     table["daily_lv_exceeded_adjusted"] = table["exceedances_adjusted"] > allowed_exceedances
     table["annual_lv_exceeded_measured"] = table["annual_mean_measured"] > annual_limit
     table["annual_lv_exceeded_adjusted"] = table["annual_mean_adjusted"] > annual_limit
+    table["daily_lv_status"] = _status(table["daily_lv_exceeded_measured"], table["daily_lv_exceeded_adjusted"])
+    table["annual_lv_status"] = _status(table["annual_lv_exceeded_measured"], table["annual_lv_exceeded_adjusted"])
+    table["overall_status"] = _status(
+        table["daily_lv_exceeded_measured"] | table["annual_lv_exceeded_measured"],
+        table["daily_lv_exceeded_adjusted"] | table["annual_lv_exceeded_adjusted"],
+    )
     table["status_change"] = np.select(
         [
-            table["daily_lv_exceeded_measured"] & ~table["daily_lv_exceeded_adjusted"],
-            table["annual_lv_exceeded_measured"] & ~table["annual_lv_exceeded_adjusted"],
+            (table["daily_lv_status"] == "met after deduction") & (table["annual_lv_status"] == "met after deduction"),
+            table["daily_lv_status"] == "met after deduction",
+            table["annual_lv_status"] == "met after deduction",
         ],
-        ["daily LV met after deduction", "annual LV met after deduction"],
+        ["daily and annual LV", "daily LV", "annual LV"],
         default="",
     )
     return table.sort_values("exceedances_measured", ascending=False, ignore_index=True)
+
+
+def _status(exceeded_measured: pd.Series, exceeded_adjusted: pd.Series) -> np.ndarray:
+    return np.select(
+        [~exceeded_measured, ~exceeded_adjusted],
+        ["met", "met after deduction"],
+        default="still exceeded",
+    )
 
 
 def compliance_summary(stations: pd.DataFrame) -> pd.DataFrame:
@@ -232,6 +274,70 @@ def plot_annual_means(stations: pd.DataFrame, *, annual_limit: float, ax=None):
     ax.set_title("Annual mean before and after deduction")
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
+    return ax
+
+
+def plot_compliance_map(stations: pd.DataFrame, *, label_daily: bool = True, ax=None):
+    """Stations whose compliance changes after the deduction, coloured by station class.
+
+    Marker shape: circle = daily LV met after deduction, square = annual LV,
+    star = both. Hollow marker = still exceeds the other limit value. Other
+    stations are small grey dots.
+    """
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    view = stations.dropna(subset=["Latitude", "Longitude"])
+    if view.empty:
+        raise ValueError("No station coordinates: run add_station_info() before station_compliance().")
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 8), subplot_kw={"projection": ccrs.PlateCarree()})
+    ax.add_feature(cfeature.LAND, facecolor="#f2f2f2")
+    ax.add_feature(cfeature.OCEAN, facecolor="#dfeaf5")
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+
+    rest = view[view["status_change"] == ""]
+    ax.scatter(rest["Longitude"], rest["Latitude"], s=8, color="#9e9e9e", alpha=0.6,
+               transform=ccrs.PlateCarree(), zorder=2)
+    markers = {"daily LV": "o", "annual LV": "s", "daily and annual LV": "*"}
+    changed = view[view["status_change"] != ""]
+    for change, marker in markers.items():
+        for cls, color in CLASS_COLORS.items():
+            rows = changed[(changed["status_change"] == change) & (changed["station_class"] == cls)]
+            if rows.empty:
+                continue
+            compliant = rows["overall_status"] == "met after deduction"
+            for mask, face in ((compliant, color), (~compliant, "none")):
+                sel = rows[mask]
+                ax.scatter(sel["Longitude"], sel["Latitude"], s=140 if marker == "*" else 70, marker=marker,
+                           facecolors=face, edgecolors=color, linewidths=1.8,
+                           transform=ccrs.PlateCarree(), zorder=3)
+    if label_daily:
+        for _, r in changed[changed["status_change"] != "annual LV"].iterrows():
+            ax.annotate(base_station_id(r[STATION]).split("/")[-1], (r["Longitude"], r["Latitude"]),
+                        xycoords=ccrs.PlateCarree()._as_mpl_transform(ax),
+                        xytext=(5, 5), textcoords="offset points", fontsize=7, zorder=4)
+
+    present = [c for c in CLASS_COLORS if (changed["station_class"] == c).any()]
+    handles = [Line2D([], [], marker="o", linestyle="", color=CLASS_COLORS[c],
+                      label=f"{c} ({int((changed['station_class'] == c).sum())})") for c in present]
+    handles += [Line2D([], [], marker=m, linestyle="", color="black",
+                       label=f"{k} met after deduction ({int((changed['status_change'] == k).sum())})")
+                for k, m in markers.items() if (changed["status_change"] == k).any()]
+    handles += [
+        Line2D([], [], marker="o", linestyle="", color="black", markerfacecolor="none",
+               label="Hollow: still exceeds the other LV"),
+        Line2D([], [], marker="o", linestyle="", color="#9e9e9e", markersize=4,
+               label=f"No change ({len(rest)})"),
+    ]
+    ax.legend(handles=handles, loc="best", fontsize=8)
+    pad = 0.5
+    ax.set_extent([view["Longitude"].min() - pad, view["Longitude"].max() + pad,
+                   view["Latitude"].min() - pad, view["Latitude"].max() + pad], crs=ccrs.PlateCarree())
+    ax.set_title("Stations that meet a limit value only after the natural deduction")
     return ax
 
 
