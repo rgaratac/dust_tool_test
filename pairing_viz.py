@@ -45,9 +45,8 @@ def filter_pairing(table: pd.DataFrame, countries=None, classes=None) -> pd.Data
 
 
 def is_unpaired(table: pd.DataFrame) -> pd.Series:
-    """No usable reference: method none, or a non-RB station with neither RB nor UB pair."""
-    no_ref = table["paired_rb_id"].isna() & table["paired_ub_id"].isna()
-    return (table["method"] == "none") | ((table["class"] != "RB") & no_ref)
+    """No natural contribution can be computed (method none). UB stations on Option 2 are not unpaired."""
+    return table["method"] == "none"
 
 
 def _fmt(value, spec="", unit=""):
@@ -122,7 +121,7 @@ def plot_station_pairing(
 
     grey = is_unpaired(view)
     groups = [(cls, view[(view["class"] == cls) & ~grey], CLASS_COLORS[cls]) for cls in ("RB", "UB", "TH", "unknown")]
-    groups.append(("No suitable pair", view[grey], UNPAIRED_COLOR))
+    groups.append(("No reference (method none)", view[grey], UNPAIRED_COLOR))
     for name, rows, color in groups:
         if rows.empty:
             continue
@@ -150,7 +149,7 @@ def plot_station_pairing(
         **{map_key: {"style": "carto-voyager" if use_maplibre else "carto-positron", "center": center, "zoom": zoom}},
         height=height,
         margin={"l": 0, "r": 0, "t": 40, "b": 0},
-        title=f"Station pairing: {len(view)} stations, {int(grey.sum())} without suitable pair",
+        title=f"Station pairing: {len(view)} stations, {int(grey.sum())} without reference (method none)",
         legend={"yanchor": "top", "y": 0.99, "xanchor": "left", "x": 0.01, "bgcolor": "rgba(255,255,255,0.7)"},
     )
     return fig
@@ -207,7 +206,7 @@ def plot_station_pairing_static(
     if not rows.empty:
         ax.scatter(rows["longitude"], rows["latitude"], s=24, color=UNPAIRED_COLOR, marker="X",
                    edgecolors="black", linewidths=0.3, transform=ccrs.PlateCarree(), zorder=4)
-        handles.append(Line2D([], [], marker="X", linestyle="", color=UNPAIRED_COLOR, label=f"No suitable pair ({len(rows)})"))
+        handles.append(Line2D([], [], marker="X", linestyle="", color=UNPAIRED_COLOR, label=f"No reference, method none ({len(rows)})"))
     if annotate:
         for _, r in view.iterrows():
             ax.annotate(f"{r['station_id']}\n{r['method']} ({r['source']})", (r["longitude"], r["latitude"]),
