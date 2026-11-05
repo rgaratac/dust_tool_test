@@ -368,12 +368,18 @@ def pairing_map_widget(session: PairingSession, *, countries=None, on_select=Non
                 trace.on_click(lambda tr, pts, _s: pts.point_inds and on_select(tr.customdata[pts.point_inds[0]][0]))
 
     def redraw(*_):
-        fig = _figure()
         if fig_widget is None:
+            import matplotlib.pyplot as plt
+
+            classes = [c for c, box in class_boxes.items() if box.value] + ["unknown"]
             with out:
                 out.clear_output(wait=True)
-                fig.show()
+                # A PNG is shown by every front end; Plotly HTML inside an Output widget is not shown by VS Code.
+                fig, _ax = plot_station_pairing_static(session.table, list(country_box.value), classes)
+                plt.show()
+                plt.close(fig)
             return
+        fig = _figure()
         fig_widget.data = []
         fig_widget.add_traces(list(fig.data))
         fig_widget.layout.title = fig.layout.title
