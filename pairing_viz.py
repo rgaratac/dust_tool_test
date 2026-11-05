@@ -314,8 +314,12 @@ def upload_pairing_csv(dest_path: str) -> str | None:
 # Widgets
 # ---------------------------------------------------------------------------
 
-def pairing_map_widget(session: PairingSession, *, countries=None, on_select=None):
-    """Map with country/class filters, redrawn when the session changes."""
+def pairing_map_widget(session: PairingSession, *, countries=None, on_select=None, clickable=True):
+    """Map with country/class filters, redrawn when the session changes.
+
+    ``clickable=False`` draws a plain Plotly figure instead of a FigureWidget,
+    which VS Code can display; stations are then chosen in the editor box.
+    """
     import ipywidgets as w
     import plotly.graph_objects as go
 
@@ -348,10 +352,12 @@ def pairing_map_widget(session: PairingSession, *, countries=None, on_select=Non
                 }
             return super()._perform_plotly_relayout(relayout_data)
 
-    try:
-        fig_widget = _MapFigureWidget(_figure())
-    except Exception:
-        fig_widget = None
+    fig_widget = None
+    if clickable:
+        try:
+            fig_widget = _MapFigureWidget(_figure())
+        except Exception:
+            fig_widget = None
     out = w.Output()
 
     def _attach_clicks():
@@ -525,13 +531,16 @@ def pairing_editor_widget(session: PairingSession, *, export_path: str | None = 
     return box
 
 
-def pairing_app(session: PairingSession, *, countries=None, export_path=None):
+def pairing_app(session: PairingSession, *, countries=None, export_path=None, clickable_map=True):
     """Map and editor together; clicking a station opens it in the editor."""
     import ipywidgets as w
 
     editor = pairing_editor_widget(session, export_path=export_path)
-    map_box = pairing_map_widget(session, countries=countries, on_select=editor.select_station)
+    map_box = pairing_map_widget(
+        session, countries=countries, on_select=editor.select_station, clickable=clickable_map,
+    )
+    hint = "Click a station on the map or type it below" if clickable_map else "Type a station below"
     return w.VBox([
-        w.HTML("<b>Click a station on the map or type it below, choose its references and press Save.</b>"),
+        w.HTML(f"<b>{hint}, choose its references and press Save.</b>"),
         map_box, editor,
     ])
