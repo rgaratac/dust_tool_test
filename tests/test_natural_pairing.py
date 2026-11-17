@@ -93,6 +93,15 @@ class DefaultPairingTest(unittest.TestCase):
         self.assertEqual(back.loc["ES/UB1", "paired_rb_id"], "ES/RB_OK")
         self.assertEqual(back.loc["ES/UB1", "source"], "default")
 
+    def test_no_pairing(self):
+        table = pr.no_pairing(self.stations).set_index("station_id")
+        self.assertEqual(table.loc["ES/RB_OK", "method"], "option1")
+        self.assertEqual(table.loc["ES/RB_OK", "paired_rb_id"], "ES/RB_OK")
+        for sid in ("ES/UB1", "ES/TH1", "ES/UB_ISLAND"):
+            self.assertEqual(table.loc[sid, "method"], "option2")
+            self.assertIsNone(table.loc[sid, "paired_rb_id"])
+            self.assertIsNone(table.loc[sid, "paired_ub_id"])
+
 
 class PairingCsvRoundTripTest(unittest.TestCase):
     def setUp(self):
@@ -254,6 +263,21 @@ class DeductionTest(unittest.TestCase):
         self.assertAlmostEqual(th_day["adjusted_value"], 45.0)
         self.assertEqual(th_day["reference_station_id"], "ES/UB")
         self.assertEqual(th_day["method"], "option2_ub_paired")
+
+    def test_no_pairing_every_station_uses_itself(self):
+        stations = _stations()
+        table = pr.no_pairing(stations)
+        rb = _series("ES/RB_OK", [10] * 15 + [40] + [10] * 15, dust_days={15})
+        th = _series("ES/TH1", [60] * 15 + [75] + [60] * 15, dust_days={15})
+        out = nc.compute_natural_contribution(
+            pd.concat([rb, th], ignore_index=True), table, dust_threshold=5, params=self.params,
+        )
+        dust = out[out["cams_dust_flag"]].set_index("Samplingpoint")
+        self.assertAlmostEqual(dust.loc["ES/RB_OK", "natural_contribution"], 30.0)
+        self.assertEqual(dust.loc["ES/RB_OK", "method"], "option1")
+        self.assertAlmostEqual(dust.loc["ES/TH1", "natural_contribution"], 15.0)
+        self.assertEqual(dust.loc["ES/TH1", "method"], "option2")
+        self.assertEqual(dust.loc["ES/TH1", "reference_station_id"], "ES/TH1")
 
     def test_adjusted_value_never_below_zero_and_insufficient_flag(self):
         ub = _series("ES/UB", [5, 5, 5, 3, 5, 5, 5], dust_days={3})

@@ -323,6 +323,18 @@ def default_pairing(stations: pd.DataFrame, limits: PairingLimits = PairingLimit
     return fill_pairing_metrics(table, st)
 
 
+def no_pairing(stations: pd.DataFrame) -> pd.DataFrame:
+    """Every station is its own reference: RB stations use Option 1, all others Option 2."""
+    table = stations.reset_index(drop=True).copy()
+    is_rb = table["class"] == "RB"
+    table["paired_rb_id"] = np.where(is_rb, table["station_id"], None)
+    table["paired_ub_id"] = None
+    table["method"] = np.where(is_rb, "option1", "option2")
+    table["source"] = "no pairing"
+    table["comment"] = ""
+    return fill_pairing_metrics(table, stations)
+
+
 def fill_pairing_metrics(table: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     """Refresh station attributes, reference names, distances and altitude differences."""
     st = stations.set_index("station_id")
