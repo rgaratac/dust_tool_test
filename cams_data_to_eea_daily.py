@@ -386,6 +386,15 @@ def cams_download_plan(year: int) -> list[dict]:
     ]
 
 
+def resolutions_for(temporal_flag: str) -> list[str]:
+    """EEA products to process: ``'both'`` runs the hourly and then the daily product."""
+    if temporal_flag == "both":
+        return ["hour", "day"]
+    if temporal_flag in ("hour", "day"):
+        return [temporal_flag]
+    raise ValueError("EEA_temporal_flag must be 'hour', 'day' or 'both'.")
+
+
 def resolve_run_flags(
     *,
     download_eea: bool,
@@ -399,11 +408,10 @@ def resolve_run_flags(
     ``DOWNLOAD_CAMS`` means new hourly CAMS files, so the daily product has to
     be rebuilt (``compute_cams_daily``). How that average is taken follows
     ``eea_temporal_flag``: ``hour`` is a UTC day, ``day`` is each station's
-    local day. A new download or a new daily product cannot be skipped by
-    loading the previous deduction Parquet.
+    local day, ``both`` builds both. A new download or a new daily product
+    cannot be skipped by loading the previous deduction Parquet.
     """
-    if eea_temporal_flag not in ("hour", "day"):
-        raise ValueError("EEA_temporal_flag must be 'hour' or 'day'.")
+    resolutions = resolutions_for(eea_temporal_flag)
     notes: list[str] = []
     if download_cams and not compute_cams_daily:
         compute_cams_daily = True
@@ -419,7 +427,9 @@ def resolve_run_flags(
         "compute_cams_daily": bool(compute_cams_daily),
         "load_parquet": bool(load_parquet),
         "eea_temporal_flag": eea_temporal_flag,
-        "local_day": eea_temporal_flag == "day",
+        "resolutions": resolutions,
+        "local_day": "day" in resolutions,
+        "utc_day": "hour" in resolutions,
         "notes": notes,
     }
 
@@ -558,6 +568,164 @@ def load_and_filter_eea_daily(folder: str, temporal_flag: str = "day") -> pd.Dat
     del obs
     gc.collect()
     return daily
+
+
+def _eea_hourly_start_to_utc(start: pd.Series) -> pd.Series:
+    """Vectorised ``eea_to_utc`` for the usual case of naive EEA hourly stamps (fixed UTC+1)."""
+    s = pd.to_datetime(start, errors="coerce")
+    if getattr(s.dt, "tz", None) is None:
+        return s.dt.tz_localize("Etc/GMT-1").dt.tz_convert("UTC")
+    return s.dt.tz_convert("UTC")
+
+
+def load_and_filter_eea_hourly(folder: str) -> pd.DataFrame:
+    """EEA hourly Parquet to UTC daily means, as the notebook's hourly branch does.
+
+    Hourly ``Start`` is fixed UTC+1 (no daylight-saving time) and converted to
+    UTC; ``day`` is the UTC day. Validity 1, verification below 3, hourly
+    aggregation and non-negative values are kept, and only days with all 24
+    hourly values are returned. Columns: ``Pollutant``, ``day``,
+    ``Samplingpoint``, ``daily_mean``, ``n_hours``, ``unit``.
+    """
+    files = sorted(glob.glob(os.path.join(folder, "**", "*.parquet"), recursive=True))
+    if not files:
+        raise FileNotFoundError(
+            f"No EEA parquet files under {folder}. Download them first (DOWNLOAD_EEA = True)."
+        )
+    needed = ["Value", "Validity", "Verification", "AggType", "Start", "Samplingpoint", "Unit", "Pollutant"]
+    frames = []
+    for file in files:
+        tmp = pd.read_parquet(file, columns=needed)
+        tmp["Value"] = pd.to_numeric(tmp["Value"], errors="coerce").astype("float32")
+        tmp["Samplingpoint"] = tmp["Samplingpoint"].astype("category")
+        tmp["Pollutant"] = tmp["Pollutant"].astype("category")
+        frames.append(tmp)
+    obs = pd.concat(frames, ignore_index=True)
+    del frames
+    gc.collect()
+    print(f"Observations before filtering: {len(obs):,}")
+
+    mask = (
+        pd.to_numeric(obs["Validity"], errors="coerce").eq(1)
+        & pd.to_numeric(obs["Verification"], errors="coerce").lt(3)
+        & obs["AggType"].astype(str).str.lower().eq("hour")
+        & (obs["Value"] >= 0)
+    )
+    obs = obs.loc[mask, ["Pollutant", "Start", "Samplingpoint", "Value", "Unit"]]
+    obs["day"] = _eea_hourly_start_to_utc(obs["Start"]).dt.floor("D")
+    daily = (
+        obs.groupby(["Pollutant", "day", "Samplingpoint"], sort=True, observed=True)
+        .agg(daily_mean=("Value", "mean"), n_hours=("Value", "count"), unit=("Unit", "first"))
+        .reset_index()
+    )
+    # Only full 24-hour days, so every daily mean covers the whole UTC day.
+    daily = daily[daily["n_hours"] == 24].reset_index(drop=True)
+    daily["daily_mean"] = daily["daily_mean"].astype("float32")
+    print(f"EEA hourly -> UTC daily rows: {len(daily):,} ({daily['Samplingpoint'].nunique()} stations)")
+    del obs
+    gc.collect()
+    return daily
+
+
+def load_eea_observations(folder: str, temporal_flag: str) -> pd.DataFrame:
+    """Daily EEA table for one product: UTC days for ``hour``, station local days for ``day``."""
+    if temporal_flag == "hour":
+        return load_and_filter_eea_hourly(folder)
+    if temporal_flag == "day":
+        return load_and_filter_eea_daily(folder, temporal_flag="day")
+    raise ValueError("temporal_flag must be 'hour' or 'day'.")
+
+
+def cams_utc_daily_path(persistent_dir: str, var: str, year: int) -> str:
+    return os.path.join(persistent_dir, f"IRA_{var}", f"cams_{var}_{year}_daily_mean.nc")
+
+
+def cams_utc_daily_grid(
+    project_dir: str, persistent_dir: str, year: int, var: str = "dust", compute: bool = False,
+) -> xr.Dataset | None:
+    """Daily mean CAMS grid on UTC days (hourly EEA product).
+
+    With ``compute`` the extracted hourly NetCDF of ``year`` under
+    ``project_dir/IRA_{var}`` are averaged per UTC day and saved in the output
+    folder; otherwise the saved file is opened. Returns None when neither exists.
+    """
+    daily_path = cams_utc_daily_path(persistent_dir, var, year)
+    if not compute:
+        if not os.path.exists(daily_path):
+            print(f"Daily CAMS file not found at {daily_path}. Set COMPUTE_CAMS_DAILY = True.")
+            return None
+        print(f"Loading the daily CAMS grid from {daily_path}")
+        return xr.open_mfdataset(daily_path, chunks={"time": "auto"})
+
+    files = sorted(glob.glob(os.path.join(project_dir, f"IRA_{var}", f"cams.eaq.ira.ENSa.{var}*{year}*.nc")))
+    print(f"Found {len(files)} CAMS files for the UTC daily mean.")
+    if not files:
+        return None
+    datasets = [xr.open_dataset(f, chunks={"time": 24, "lat": 100, "lon": 100}) for f in files]
+    master_lat, master_lon = datasets[0].lat, datasets[0].lon
+    aligned = [
+        ds if (ds.lat.equals(master_lat) and ds.lon.equals(master_lon))
+        else ds.interp(lat=master_lat, lon=master_lon, method="nearest")
+        for ds in datasets
+    ]
+    hourly = xr.concat(aligned, dim="time").sortby("time")
+    daily = hourly.resample(time="1D").mean(keep_attrs=False).compute()
+    # Attributes can hold characters that fail to encode when saving.
+    daily.attrs = {}
+    for name in daily.variables:
+        daily[name].attrs = {}
+    os.makedirs(os.path.dirname(daily_path), exist_ok=True)
+    daily.to_netcdf(daily_path)
+    print(f"Saved the daily CAMS grid to {daily_path}")
+    hourly.close()
+    for ds in datasets:
+        ds.close()
+    return daily
+
+
+def add_cams_utc_daily_dust(
+    daily_cams: xr.Dataset,
+    df: pd.DataFrame,
+    var_name: str = "dust",
+    time_col: str = "day",
+    station_col: str = "Samplingpoint",
+    lat_col: str = "Latitude",
+    lon_col: str = "Longitude",
+) -> pd.DataFrame:
+    """Add ``cams_{var_name}`` from a UTC daily grid, interpolated at each station (hourly product).
+
+    Stations outside the CAMS domain are dropped. Each station is interpolated
+    bilinearly once and the nearest UTC day is taken for every row; nearest
+    grid point is used where the bilinear value is missing.
+    """
+    lat_name = next((d for d in daily_cams.dims if d.lower().startswith("lat")), "lat")
+    lon_name = next((d for d in daily_cams.dims if d.lower().startswith("lon")), "lon")
+    lat_min, lat_max = float(daily_cams[lat_name].min()), float(daily_cams[lat_name].max())
+    lon_min, lon_max = float(daily_cams[lon_name].min()), float(daily_cams[lon_name].max())
+
+    out = df.copy()
+    out[lat_col] = pd.to_numeric(out[lat_col], errors="coerce")
+    out[lon_col] = pd.to_numeric(out[lon_col], errors="coerce")
+    inside = out[lat_col].between(lat_min, lat_max) & out[lon_col].between(lon_min, lon_max)
+    n_before = out[station_col].nunique()
+    out = out[inside].copy()
+    print(f"Stations outside the CAMS domain: {n_before - out[station_col].nunique()} removed, "
+          f"{out[station_col].nunique()} remain.")
+
+    times = pd.to_datetime(out[time_col], utc=True, errors="coerce").dt.floor("D").dt.tz_convert(None)
+    out_name = f"cams_{var_name}"
+    out[out_name] = np.float32(np.nan)
+    da = daily_cams[var_name]
+    stations = out[[station_col, lat_col, lon_col]].drop_duplicates(subset=[station_col])
+    for station_id, lat0, lon0 in stations.itertuples(index=False, name=None):
+        rows = out[station_col] == station_id
+        when = xr.DataArray(times[rows].to_numpy(), dims="index")
+        point = {lat_name: float(lat0), lon_name: float(lon0)}
+        vals = da.interp(point, method="linear").sel(time=when, method="nearest").values
+        if np.isnan(vals).any():
+            vals = da.interp(point, method="nearest").sel(time=when, method="nearest").values
+        out.loc[rows, out_name] = np.asarray(vals, dtype=np.float32)
+    return out
 
 
 def merge_station_metadata(
