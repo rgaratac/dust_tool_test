@@ -292,10 +292,10 @@ def download_file(path: str) -> None:
         print(f"Saved to {os.path.abspath(path)}")
 
 
-def upload_pairing_csv(dest_path: str) -> str | None:
-    """Ask for a CSV upload in Colab and store it as ``dest_path``."""
+def upload_file(dest_path: str) -> str | None:
+    """Ask for a file upload in Colab and store it as ``dest_path``."""
     if not in_colab():
-        print(f"Not in Colab. Place the edited file at {os.path.abspath(dest_path)} instead.")
+        print(f"Not in Colab. Place the file at {os.path.abspath(dest_path)} instead.")
         return dest_path if os.path.isfile(dest_path) else None
     from google.colab import files
 
@@ -308,6 +308,11 @@ def upload_pairing_csv(dest_path: str) -> str | None:
         handle.write(content)
     print(f"Stored {name} as {dest_path}")
     return dest_path
+
+
+def upload_pairing_csv(dest_path: str) -> str | None:
+    """Ask for a CSV upload in Colab and store it as ``dest_path``."""
+    return upload_file(dest_path)
 
 
 # ---------------------------------------------------------------------------

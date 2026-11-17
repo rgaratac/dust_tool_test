@@ -602,6 +602,199 @@ def merge_station_metadata(
     return out
 
 
+# ---------------------------------------------------------------------------
+# User-supplied observations (EEA Parquet and DataExtract.csv layout)
+# ---------------------------------------------------------------------------
+
+# Same columns as the EEA observation Parquet files. Validity and Verification are optional.
+USER_OBSERVATION_COLUMNS = ["Samplingpoint", "Pollutant", "Start", "End", "Value", "Unit", "AggType"]
+USER_OBSERVATION_FLAGS = ["Validity", "Verification"]
+# Same columns as DataExtract.csv.
+USER_STATION_COLUMNS = [
+    "Air Quality Station EoI Code", "Air Quality Station Name", "Sampling Point Id", "Air Pollutant",
+    "Longitude", "Latitude", "Altitude", "Air Quality Station Area", "Air Quality Station Type", "Timezone",
+]
+EEA_POLLUTANT_CODES = {"5": "PM10", "6001": "PM2.5"}
+EEA_AREAS = ("urban", "suburban", "rural", "rural-nearcity", "rural-regional", "rural-remote")
+EEA_STATION_TYPES = ("background", "traffic", "industrial")
+_TIMEZONE_PATTERN = r"^UTC([+-]\d{2}(:\d{2})?)?$"
+
+
+def _read_user_csv(path: str, required: Sequence[str]) -> pd.DataFrame:
+    table = pd.read_csv(path, sep=None, engine="python", dtype=str)
+    table.columns = [str(col).strip() for col in table.columns]
+    missing = [col for col in required if col not in table.columns]
+    if missing:
+        raise KeyError(f"{path} is missing columns {missing}. Required columns: {list(required)}")
+    for col in required:
+        table[col] = table[col].str.strip()
+    return table
+
+
+def _require(table: pd.DataFrame, bad: pd.Series, path: str, message: str, column: str) -> None:
+    if bad.any():
+        raise ValueError(
+            f"{path}: {int(bad.sum())} row(s) {message}. First one: {column} = {table.loc[bad, column].iloc[0]!r}"
+        )
+
+
+def _pollutant_name(value) -> str:
+    text = str(value).strip()
+    return EEA_POLLUTANT_CODES.get(text.split(".")[0], text)
+
+
+def load_user_stations(path: str, pollutant: str) -> pd.DataFrame:
+    """Read and check a user stations CSV in the ``DataExtract.csv`` layout.
+
+    Every column in ``USER_STATION_COLUMNS`` is required and must be filled in.
+    Only rows for ``pollutant`` are returned.
+    """
+    st = _read_user_csv(path, USER_STATION_COLUMNS)
+    empty = st[USER_STATION_COLUMNS].isna().any(axis=1) | st[USER_STATION_COLUMNS].eq("").any(axis=1)
+    _require(st, empty, path, f"have an empty value in {USER_STATION_COLUMNS}", "Sampling Point Id")
+    _require(st, ~st["Air Quality Station EoI Code"].str.match(r"^[A-Z]{2}\S+$"), path,
+             "have an EoI code that does not start with the 2-letter country code", "Air Quality Station EoI Code")
+    st["Air Pollutant"] = st["Air Pollutant"].map(_pollutant_name)
+    for col, low, high in (("Latitude", -90, 90), ("Longitude", -180, 180), ("Altitude", -500, 9000)):
+        st[col] = pd.to_numeric(st[col], errors="coerce")
+        _require(st, ~st[col].between(low, high), path, f"have a {col} that is not a number in [{low}, {high}]", "Sampling Point Id")
+    _require(st, ~st["Air Quality Station Area"].str.lower().isin(EEA_AREAS), path,
+             f"have an area that is not one of {EEA_AREAS}", "Air Quality Station Area")
+    _require(st, ~st["Air Quality Station Type"].str.lower().isin(EEA_STATION_TYPES), path,
+             f"have a type that is not one of {EEA_STATION_TYPES}", "Air Quality Station Type")
+    _require(st, ~st["Timezone"].str.upper().str.match(_TIMEZONE_PATTERN), path,
+             "have a Timezone that is not like 'UTC', 'UTC+01' or 'UTC-04'", "Timezone")
+    st = st[st["Air Pollutant"] == pollutant]
+    if st.empty:
+        raise ValueError(f"{path} has no rows with Air Pollutant = {pollutant!r}.")
+    return st.reset_index(drop=True)
+
+
+def load_user_observations(
+    path: str,
+    stations: pd.DataFrame,
+    temporal_flag: str = "day",
+    pollutant: str = "PM10",
+    min_hours: int = 24,
+) -> pd.DataFrame:
+    """Read a user CSV in the EEA observation layout into the daily table of the EEA loaders.
+
+    Every column in ``USER_OBSERVATION_COLUMNS`` is required. Negative values are
+    dropped and, when the optional ``Validity`` / ``Verification`` columns are
+    present, rows are filtered like the EEA data (Validity 1, Verification 1 or 2).
+    Daily ``Start`` is the station's local date. Hourly ``Start`` without an
+    offset is fixed UTC+1, like EEA hourly data; days with fewer than
+    ``min_hours`` values are dropped. Every ``Samplingpoint`` must be in ``stations``.
+    """
+    obs = _read_user_csv(path, USER_OBSERVATION_COLUMNS)
+    filled = [col for col in USER_OBSERVATION_COLUMNS if col != "Value"]
+    empty = obs[filled].isna().any(axis=1) | obs[filled].eq("").any(axis=1)
+    _require(obs, empty, path, f"have an empty value in {filled}", "Samplingpoint")
+    _require(obs, ~obs["Samplingpoint"].str.match(r"^[A-Z]{2}/\S+$"), path,
+             "have a Samplingpoint that is not '<country code>/<Sampling Point Id>'", "Samplingpoint")
+    _require(obs, obs["Unit"] != "ug.m-3", path, "have a Unit other than 'ug.m-3'", "Unit")
+    obs["AggType"] = obs["AggType"].str.lower()
+    _require(obs, ~obs["AggType"].isin(("hour", "day")), path, "have an AggType other than 'hour' or 'day'", "AggType")
+    flags = [col for col in USER_OBSERVATION_FLAGS if col in obs.columns]
+    for col in flags:
+        obs[col] = pd.to_numeric(obs[col], errors="coerce")
+        _require(obs, obs[col].isna(), path, f"have a {col} that is empty or not a number", "Samplingpoint")
+    start = pd.to_datetime(obs["Start"], errors="coerce")
+    end = pd.to_datetime(obs["End"], errors="coerce")
+    _require(obs, start.isna() | end.isna() | (end <= start), path,
+             "have a Start or End that is not a date, or End not after Start", "Start")
+
+    known = set(samplingpoint_key(stations))
+    unknown = ~obs["Samplingpoint"].isin(known)
+    _require(obs, unknown, path, "have a Samplingpoint that is not in the stations file", "Samplingpoint")
+
+    obs["Pollutant"] = obs["Pollutant"].map(_pollutant_name)
+    obs = obs[(obs["Pollutant"] == pollutant) & (obs["AggType"] == temporal_flag)]
+    if obs.empty:
+        raise ValueError(f"{path} has no rows with Pollutant = {pollutant!r} and AggType = {temporal_flag!r}.")
+    obs["Value"] = pd.to_numeric(obs["Value"], errors="coerce")
+    n_rows = len(obs)
+    keep = obs["Value"] >= 0
+    if "Validity" in flags:
+        keep &= obs["Validity"].eq(1)
+    if "Verification" in flags:
+        keep &= obs["Verification"].lt(3)
+    obs = obs[keep]
+    print(f"User observations: {n_rows - len(obs):,} of {n_rows:,} rows dropped (empty or negative Value"
+          + "".join(f", {col}" for col in flags) + ").")
+
+    if temporal_flag == "hour":
+        obs["day"] = eea_to_utc(obs["Start"]).dt.floor("D")
+    else:
+        obs["day"] = naive_calendar_day(obs["Start"])
+    daily = (
+        obs.groupby(["Pollutant", "day", "Samplingpoint"], sort=True)
+        .agg(daily_mean=("Value", "mean"), n_values=("Value", "count"), unit=("Unit", "first"))
+        .reset_index()
+    )
+    if temporal_flag == "hour":
+        daily = daily[daily["n_values"] >= min_hours]
+    daily = daily.drop(columns="n_values")
+    daily["daily_mean"] = daily["daily_mean"].astype("float32")
+    print(f"User observations: {len(daily):,} daily rows ({daily['Samplingpoint'].nunique()} stations)")
+    return daily.reset_index(drop=True)
+
+
+def samplingpoint_key(metadata: pd.DataFrame) -> pd.Series:
+    """``<country code>/<Sampling Point Id>``, the key used for the EEA observations."""
+    return metadata["Air Quality Station EoI Code"].astype(str).str[:2] + "/" + metadata["Sampling Point Id"].astype(str)
+
+
+def combine_station_metadata(datatract_path: str | None = None, extra: pd.DataFrame | None = None) -> pd.DataFrame:
+    """``DataExtract.csv`` plus user stations. User rows come first, so they win on duplicates."""
+    frames = []
+    if extra is not None:
+        frames.append(extra)
+    if datatract_path and os.path.exists(datatract_path):
+        frames.append(pd.read_csv(datatract_path, low_memory=False))
+    if not frames:
+        raise FileNotFoundError("No station metadata: provide DataExtract.csv or a user stations file.")
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def write_user_templates(folder: str, temporal_flag: str = "day", pollutant: str = "PM10") -> tuple[str, str]:
+    """Write example observation and station CSVs in the EEA layout."""
+    os.makedirs(folder, exist_ok=True)
+    step = pd.Timedelta(hours=1) if temporal_flag == "hour" else pd.Timedelta(days=1)
+    starts = pd.date_range("2025-01-01", periods=3, freq=step)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    obs = pd.DataFrame(
+        {
+            "Samplingpoint": ["ES/SP_MY_STATION_1"] * 3 + ["ES/SP_MY_STATION_2"] * 3,
+            "Pollutant": pollutant,
+            "Start": list(starts.strftime(fmt)) * 2,
+            "End": list((starts + step).strftime(fmt)) * 2,
+            "Value": [21.4, 35.0, 18.2, 40.1, 52.3, 30.7],
+            "Unit": "ug.m-3",
+            "AggType": temporal_flag,
+        }
+    )
+    stations = pd.DataFrame(
+        {
+            "Air Quality Station EoI Code": ["ES9001A", "ES9002A"],
+            "Air Quality Station Name": ["My rural station", "My traffic station"],
+            "Sampling Point Id": ["SP_MY_STATION_1", "SP_MY_STATION_2"],
+            "Air Pollutant": pollutant,
+            "Longitude": [-3.70, -3.69],
+            "Latitude": [40.70, 40.42],
+            "Altitude": [700, 650],
+            "Air Quality Station Area": ["rural-regional", "urban"],
+            "Air Quality Station Type": ["background", "traffic"],
+            "Timezone": "UTC+01",
+        }
+    )
+    obs_path = os.path.join(folder, "user_observations_example.csv")
+    stations_path = os.path.join(folder, "user_stations_example.csv")
+    obs.to_csv(obs_path, index=False)
+    stations.to_csv(stations_path, index=False)
+    return obs_path, stations_path
+
+
 def _dim_name(dims: Iterable[str], prefix: str) -> str:
     for dim in dims:
         if str(dim).lower().startswith(prefix):
