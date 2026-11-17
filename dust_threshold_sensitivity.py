@@ -24,8 +24,6 @@ import argparse
 import os
 
 import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -475,6 +473,8 @@ def _parse_thresholds(text: str) -> list[float]:
 
 
 def main() -> None:
+    # Only for command-line runs: on import it would hide every plot in the notebook.
+    matplotlib.use("Agg")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--parquet",
