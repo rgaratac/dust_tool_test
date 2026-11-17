@@ -70,7 +70,7 @@ GDRIVE_OUTPUT_DIR = "/content/drive/MyDrive/CAMS_Tool_output"
 VAR = "dust"
 cams_dust_threshold = 5.0       # µg/m3
 Station_Temporal_coverage = 65  # percent, notebook default
-Basline_MA_days = 6             # notebook default (hourly script uses 15)
+Basline_MA_days = 6             # neighbour window of this script's baseline (hourly script uses 15)
 MIN_CAMS_HOURS = 18             # minimum equivalent hours inside a local day
 CAMS_BUFFER_DEG = 0.2
 ###############################################
@@ -1467,13 +1467,26 @@ def deduction_parquet_path(
     dataset_name: str,
     temporal_flag: str,
     year: int,
-    neighbor_n: int,
+    neighbor_n: int | None = None,
 ) -> str:
-    """Same name the notebook loads and saves on Google Drive."""
+    """Same name the notebook loads and saves. ``neighbor_n`` adds the ``_MA{n}`` suffix of earlier versions."""
+    suffix = f"_MA{neighbor_n}" if neighbor_n is not None else ""
     return os.path.join(
         persistent_dir,
-        f"CAMS_dust_{pollutant}_deduction_{dataset_name}_{temporal_flag}_{year}_MA{neighbor_n}.parquet",
+        f"CAMS_dust_{pollutant}_deduction_{dataset_name}_{temporal_flag}_{year}{suffix}.parquet",
     )
+
+
+def find_deduction_parquet(
+    persistent_dir: str, pollutant: str, dataset_name: str, temporal_flag: str, year: int
+) -> str:
+    """Deduction Parquet path; falls back to an ``_MA{n}`` file saved by an earlier version."""
+    path = deduction_parquet_path(persistent_dir, pollutant, dataset_name, temporal_flag, year)
+    if not os.path.exists(path):
+        legacy = sorted(glob.glob(path[: -len(".parquet")] + "_MA*.parquet"))
+        if legacy:
+            return legacy[0]
+    return path
 
 
 # Clock behind the ``day`` column of each saved deduction table.
@@ -1691,9 +1704,7 @@ def main() -> pd.DataFrame:
         dust_threshold=cams_dust_threshold,
         neighbor_n= neighbor_MA,
     )
-    output = deduction_parquet_path(
-        persistent_dir, POLLUTANT, dataset, EEA_temporal_flag, YEAR, Basline_MA_days
-    )
+    output = deduction_parquet_path(persistent_dir, POLLUTANT, dataset, EEA_temporal_flag, YEAR)
     result.to_parquet(output, index=False, compression="snappy")
     elapsed = time.time() - start_time
     print("-" * 30)

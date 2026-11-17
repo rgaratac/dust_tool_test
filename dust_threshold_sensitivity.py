@@ -15,7 +15,7 @@ previous year, so the first days of January can differ slightly from a full
 notebook run.
 
 Run:
-    python dust_threshold_sensitivity.py --parquet CAMS_dust_PM10_deduction_E2a_hour_2024_MA6.parquet
+    python dust_threshold_sensitivity.py --parquet CAMS_dust_PM10_deduction_E2a_hour_2024.parquet
 """
 
 from __future__ import annotations
@@ -362,7 +362,7 @@ def run_sensitivity(
     if not os.path.isfile(parquet_path):
         raise FileNotFoundError(
             f"Hourly deduction Parquet not found: {parquet_path}. "
-            "Point --parquet at CAMS_dust_{{pollutant}}_deduction_{{dataset}}_hour_{{year}}_MA{{n}}.parquet."
+            "Point --parquet at CAMS_dust_{{pollutant}}_deduction_{{dataset}}_hour_{{year}}.parquet."
         )
     thresholds = list(THRESHOLDS if thresholds is None else thresholds)
     df = pd.read_parquet(parquet_path)

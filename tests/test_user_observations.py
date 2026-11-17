@@ -28,6 +28,18 @@ class UserObservationsTest(unittest.TestCase):
     def _obs(self):
         return pd.read_csv(self.obs_path, dtype=str)
 
+    def test_deduction_parquet_name_and_legacy_file(self):
+        new = cams_daily.deduction_parquet_path(self.folder, "PM10", "E2a", "hour", 2025)
+        self.assertTrue(new.endswith("CAMS_dust_PM10_deduction_E2a_hour_2025.parquet"))
+        self.assertEqual(cams_daily.find_deduction_parquet(self.folder, "PM10", "E2a", "hour", 2025), new)
+
+        legacy = cams_daily.deduction_parquet_path(self.folder, "PM10", "E2a", "hour", 2025, 6)
+        open(legacy, "wb").close()
+        self.assertEqual(cams_daily.find_deduction_parquet(self.folder, "PM10", "E2a", "hour", 2025), legacy)
+
+        open(new, "wb").close()
+        self.assertEqual(cams_daily.find_deduction_parquet(self.folder, "PM10", "E2a", "hour", 2025), new)
+
     def test_templates_load_as_daily_table(self):
         daily = cams_daily.load_user_observations(self.obs_path, self.stations, "day", "PM10")
         self.assertEqual(list(daily.columns), ["Pollutant", "day", "Samplingpoint", "daily_mean", "unit"])

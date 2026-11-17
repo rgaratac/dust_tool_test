@@ -46,7 +46,6 @@ Thresholds, limit values and method parameters in the next cell:
 | `PM10_ANNUAL_LIMIT` | 20 µg/m³ | Annual PM10 limit |
 | `PM25_ANNUAL_LIMIT` | 10 µg/m³ | Annual PM2.5 limit |
 | `Station_Temporal_coverage` | 65% | Minimum share of days in the selected year required to keep a station |
-| `Basline_MA_days` | 6 | Only used in output file names (`_MA6`) since the new methods |
 | `MAX_RB_DISTANCE_KM` | 100 | Maximum horizontal distance to a suitable regional background (RB) reference |
 | `MAX_RB_ALTITUDE_DIFF_M` | 500 | Maximum altitude difference to a suitable RB reference |
 | `MAX_UB_DISTANCE_KM` | 50 | Maximum distance between a traffic/industrial (TH) station and its urban background (UB) reference |
@@ -161,9 +160,9 @@ An alternative formula that scales CAMS dust by the ratio of observed PM to CAMS
 
 When `LOAD_PARQUET_DATA` is `False`, the daily table for all stations is written as a Parquet file in the output folder (Google Drive or the project folder):
 
-`CAMS_dust_{POLLUTANT}_deduction_{dataset}_{EEA_temporal_flag}_{YEAR}_MA{Basline_MA_days}.parquet`
+`CAMS_dust_{POLLUTANT}_deduction_{dataset}_{EEA_temporal_flag}_{YEAR}.parquet`
 
-Example: `CAMS_dust_PM10_deduction_E2a_hour_2025_MA6.parquet`. A later run with `LOAD_PARQUET_DATA = True` reads that same path and skips sections 3–6. With `REAPPLY_PAIRING_ON_LOAD = True` the deduction is recomputed on the loaded table with the current pairing; that table covers only the selected year, so the first and last days have a shorter reference window.
+Example: `CAMS_dust_PM10_deduction_E2a_hour_2025.parquet`. A later run with `LOAD_PARQUET_DATA = True` reads that same path and skips sections 3–6. If only a file from an earlier version exists (name ending in `_MA6.parquet`), that file is loaded. With `REAPPLY_PAIRING_ON_LOAD = True` the deduction is recomputed on the loaded table with the current pairing; that table covers only the selected year, so the first and last days have a shorter reference window.
 
 The adjusted daily series is summarised per station for the selected year (`natural_contribution.station_indicators`). Exceedances and annual means are recalculated from the daily values, with and without the natural contribution:
 
@@ -179,7 +178,7 @@ The adjusted daily series is summarised per station for the selected year (`natu
 
 The station summary is written as CSV in the output folder:
 
-* one country: `{country code}_station_annual_{POLLUTANT}_{dataset}_{EEA_temporal_flag}_{YEAR}_MA{Basline_MA_days}.csv` (for example `ES_station_annual_PM10_E2a_hour_2025_MA6.csv`)
+* one country: `{country code}_station_annual_{POLLUTANT}_{dataset}_{EEA_temporal_flag}_{YEAR}.csv` (for example `ES_station_annual_PM10_E2a_hour_2025.csv`)
 * two or more countries: `muti_countries_station_annual_...csv` (the prefix is spelled that way in the notebook)
 
 ### 7. Visualisation
@@ -247,19 +246,19 @@ Standalone CAMS download, separate from the notebook’s download cells.
 
 Daily-observation counterpart of `Dust_discount_hourly.py`. The notebook calls it when `EEA_temporal_flag` is `day`. Importing the module does not download or compute; `python cams_data_to_eea_daily.py` runs `main()`.
 
-* **Inputs:** The same settings as the notebook, at the top of the file: `Countries`, `YEAR`, `POLLUTANT` (`PM10` or `PM2.5`), `dataset` (`E1a` or `E2a`), `EEA_temporal_flag = 'day'`, `DOWNLOAD_EEA`, `DOWNLOAD_CAMS`, `COMPUTE_CAMS_DAILY`, `USE_GOOGLE_DRIVE`, dust threshold, coverage (default 65%), and `Basline_MA_days` (default 6). `resolve_run_flags` applies the same rules as the notebook: `DOWNLOAD_CAMS` turns `COMPUTE_CAMS_DAILY` on. EEA data come from the same download API as the notebook (dataset id 1 for `E2a`, 2 for `E1a`, 14 December of the previous year through 31 December, `aggregationType` `day`). An existing zip is extracted when `DOWNLOAD_EEA` is `False`. CAMS zips are stored in the output folder and extracted only when the daily product is rebuilt. Station coordinates and `Timezone` come from `DataExtract.csv` in the output folder, or from `Data/DataExtract.csv` if that is the copy you have.
+* **Inputs:** The same settings as the notebook, at the top of the file: `Countries`, `YEAR`, `POLLUTANT` (`PM10` or `PM2.5`), `dataset` (`E1a` or `E2a`), `EEA_temporal_flag = 'day'`, `DOWNLOAD_EEA`, `DOWNLOAD_CAMS`, `COMPUTE_CAMS_DAILY`, `USE_GOOGLE_DRIVE`, dust threshold, coverage (default 65%), and `Basline_MA_days` (default 6, the neighbour window of the script's baseline). `resolve_run_flags` applies the same rules as the notebook: `DOWNLOAD_CAMS` turns `COMPUTE_CAMS_DAILY` on. EEA data come from the same download API as the notebook (dataset id 1 for `E2a`, 2 for `E1a`, 14 December of the previous year through 31 December, `aggregationType` `day`). An existing zip is extracted when `DOWNLOAD_EEA` is `False`. CAMS zips are stored in the output folder and extracted only when the daily product is rebuilt. Station coordinates and `Timezone` come from `DataExtract.csv` in the output folder, or from `Data/DataExtract.csv` if that is the copy you have.
 * **What it does:** Filters daily EEA values the way the notebook filters hourly values (validity, verification, non-negative), without converting local dates to UTC. Keeps stations that meet the coverage rule. Builds CAMS daily means on each station’s local day, in memory-safe chunks, and reuses Drive or local Parquet caches. Then applies the same dust flag (`cams_dust` above the threshold), exceedance flag, neighbour-median background, and clipped dust contribution as the notebook. The background is computed only on days that are both dusty and an exceedance, matching `util.compute_station_baseline` (the hourly script still has the exceedance term commented out).
-* **Output:** `CAMS_dust_{POLLUTANT}_deduction_{dataset}_day_{YEAR}_MA{Basline_MA_days}.parquet` in the Google Drive output folder or the project folder. Columns match the notebook (`day`, `daily_mean`, `cams_dust`, `dust_flag`, `Exceedance`, `pollutant_median`, `Dust_contribution`, `corrected_pollutant`, coordinates), so `LOAD_PARQUET_DATA = True` reads this file the same way it reads an hourly result. The filename includes the time resolution, so it does not overwrite an hourly run.
+* **Output:** `CAMS_dust_{POLLUTANT}_deduction_{dataset}_day_{YEAR}.parquet` in the Google Drive output folder or the project folder. Columns match the notebook (`day`, `daily_mean`, `cams_dust`, `dust_flag`, `Exceedance`, `pollutant_median`, `Dust_contribution`, `corrected_pollutant`, coordinates), so `LOAD_PARQUET_DATA = True` reads this file the same way it reads an hourly result. The filename includes the time resolution, so it does not overwrite an hourly run.
 * **Relation to the notebook:** Section 4 of the notebook calls `load_and_filter_eea_daily` and `add_cams_local_daily_dust`, then continues with the existing deduction, summary, and plots. Running the script by itself performs that whole chain and writes the Parquet the notebook would load. Section 7.3 calls `load_and_combine_deduction_parquets` when you choose to plot the hourly and daily tables together.
 
 ### `dust_threshold_sensitivity.py`
 
 Recomputes the hourly deduction at CAMS dust thresholds 3 through 10 µg/m³ and compares exceedance days.
 
-* **Inputs:** The saved hourly deduction Parquet (`CAMS_dust_{POLLUTANT}_deduction_{dataset}_hour_{YEAR}_MA{n}.parquet`), `--pollutant` (`PM10` or `PM2.5`), and `--neighbor-n` (default 6, the notebook’s `Basline_MA_days`). The default thresholds are 3, 4, 5, 6, 7, 8, 9 and 10 µg/m³. The reference for the scatter plots is 5 µg/m³.
+* **Inputs:** The saved hourly deduction Parquet (`CAMS_dust_{POLLUTANT}_deduction_{dataset}_hour_{YEAR}.parquet`), `--pollutant` (`PM10` or `PM2.5`), and `--neighbor-n` (default 6, the neighbour window of the previous baseline method). The default thresholds are 3, 4, 5, 6, 7, 8, 9 and 10 µg/m³. The reference for the scatter plots is 5 µg/m³.
 * **What it does:** For each threshold, flags dust days where `cams_dust` is above that value and rebuilds the neighbour-median background, dust contribution, and corrected concentration the way the notebook does. Plots and the summary use exceedance days, the days when the measured daily mean is above the pollutant limit. The file is the hourly product, so `day` is a UTC day. Neighbour days are taken from that saved year. The notebook also uses 14 December of the previous year, so the first days of January can differ slightly from a full notebook run.
 * **Outputs:** In `dust_threshold_sensitivity/` (or `--output-dir`): `threshold_summary.csv`, `scatter_contribution_exceedance.png` (contribution at each threshold against 5 µg/m³), `scatter_dust_exceedance_days.png` (per station, how many exceedance days are attributed to dust), `distribution_contribution_exceedance.png` (boxplots), and `distribution_corrected_exceedance.png` (overlaid histograms of the corrected concentration).
-* **Relation to the notebook:** It does not change the notebook result. Run it after an hourly deduction Parquet exists: `python dust_threshold_sensitivity.py --parquet CAMS_dust_PM10_deduction_E2a_hour_2024_MA6.parquet`.
+* **Relation to the notebook:** It does not change the notebook result. Run it after an hourly deduction Parquet exists: `python dust_threshold_sensitivity.py --parquet CAMS_dust_PM10_deduction_E2a_hour_2024.parquet`.
 
 ### `Dust_discount_hourly.py`
 
@@ -277,7 +276,7 @@ Draws two Matplotlib figures of an earlier description of storage and processing
 * `storage_flowchart.png` — download, filter, dust flag, baseline, and outputs
 * `storage_hierarchy.png` — folder layout and a short list of helper functions
 
-It does not read EEA or CAMS data and is not used by the notebook. The numbers on those figures (for example 75% coverage and a 30-day or 15-day window) are the ones that were drawn into the script; they are not the notebook defaults (65% coverage and `Basline_MA_days = 6`). The workflow chart in `docs/` is a separate image of the current notebook.
+It does not read EEA or CAMS data and is not used by the notebook. The numbers on those figures (for example 75% coverage and a 30-day or 15-day window) are the ones that were drawn into the script; they are not the notebook defaults (65% coverage, Option 1 ±15 days, Option 2 ±3 days). The workflow chart in `docs/` is a separate image of the current notebook.
 
 ## How to run
 
@@ -324,8 +323,7 @@ There is no pinned environment file. The notebook and scripts import:
 | Daily CAMS field (hourly path, UTC) | `IRA_dust/` | `cams_dust_{YEAR}_daily_mean.nc` |
 | Station-hourly CAMS cache (daily path) | `IRA_dust/` on Drive or in the project folder | `cams_dust_station_hourly_<stations>_<source>.parquet` |
 | Local-day CAMS cache (daily path) | `IRA_dust/` on Drive or in the project folder | `cams_dust_local_daily_stations_<stations>_<year>_h18.parquet` |
-| Daily deduction table | Google Drive output folder | `CAMS_dust_{POLLUTANT}_deduction_{dataset}_{temporal}_{YEAR}_MA{n}.parquet` |
-| Daily deduction table (local save) | Project folder | `CAMS_dust_deduction_{dataset}_{temporal}_{YEAR}.parquet` |
+| Daily deduction table | Google Drive output folder, or the project folder | `CAMS_dust_{POLLUTANT}_deduction_{dataset}_{temporal}_{YEAR}.parquet` |
 | Station summary | Same output folder | `{country}_station_annual_....csv` or `muti_countries_station_annual_....csv` |
 | Dust-threshold comparison | `dust_threshold_sensitivity/` | `threshold_summary.csv` and the scatter and distribution PNGs from `dust_threshold_sensitivity.py` |
 
@@ -337,7 +335,7 @@ Daily CAMS dust is now part of the deduction when `EEA_temporal_flag` is `day`. 
 
 * **Daylight-saving time is not modelled.** Both paths use the fixed offset in the data: UTC+1 for every hourly stamp, and the `Timezone` label for each daily station. If a country builds its official daily value in civil time, the hour of a spring or autumn transition can sit in the neighbouring local day.
 * **The hourly path’s UTC grid can still exceed Colab memory.** `COMPUTE_CAMS_DAILY` on `EEA_temporal_flag = 'hour'` still averages the full CAMS domain. The daily path avoids that by sampling stations one UTC day at a time. The first compute still extracts the hourly NetCDF from the stored zips, and a Copernicus ADS key is required to download a missing zip.
-* **A few setup mismatches are still in the notebook.** `DOWNLOAD_EEA = True` deletes and replaces an existing EEA zip; `DOWNLOAD_CAMS = True` reuses a zip that is already in the output folder. With `USE_GOOGLE_DRIVE = False`, the save cell writes `CAMS_dust_deduction_{dataset}_{temporal}_{YEAR}.parquet` (and `project_dir = '.'` has no slash), while the load cell looks for the longer `CAMS_dust_{POLLUTANT}_..._MA{n}` name. The hourly UTC-grid step only globs NetCDF files whose name contains `YEAR`, so December of the previous year is missing on that path; the local-day path includes it. Section 1 always replaces `util.py` with the copy on `main`. `DataExtract.csv` is still a file you place by hand. Extracted hourly NetCDF is left on the Colab disk after the run so later cells can read it; it is not uploaded to Drive.
+* **A few setup mismatches are still in the notebook.** `DOWNLOAD_EEA = True` deletes and replaces an existing EEA zip; `DOWNLOAD_CAMS = True` reuses a zip that is already in the output folder. The hourly UTC-grid step only globs NetCDF files whose name contains `YEAR`, so December of the previous year is missing on that path; the local-day path includes it. Section 1 always replaces `util.py` with the copy on `main`. `DataExtract.csv` is still a file you place by hand. Extracted hourly NetCDF is left on the Colab disk after the run so later cells can read it; it is not uploaded to Drive.
 * **Stations outside the CAMS European domain are dropped** on both paths (for example some overseas territories whose metadata offset is `UTC-04` or `UTC+04`).
 * **A local day is kept only when at least 75% of its CAMS hours are present** (18 hours for hourly files). The first and last days of the archive can be missing for stations whose offset reaches outside the downloaded hours.
 * The workflow chart in `docs/` shows the hourly path. The daily branch is the extra step in section 4.5 of the notebook.
