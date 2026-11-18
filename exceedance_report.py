@@ -27,7 +27,7 @@ NATURAL_COLOR = "#e6a23c"
 CLASS_COLORS = {"RB": "#2ca02c", "UB": "#1f77b4", "TH": "#d62728", "unknown": "#8c564b"}
 
 # The combined hourly/daily table labels each Samplingpoint with its clock.
-_CLOCK_SUFFIX = re.compile(r"\s+\((UTC day|station local day)\)$")
+_CLOCK_SUFFIX = re.compile(r"\s+\((hourly, )?(UTC day|station local day)\)$")
 
 
 def base_station_id(samplingpoint) -> str:

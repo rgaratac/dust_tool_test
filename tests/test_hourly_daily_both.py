@@ -69,6 +69,83 @@ class LoadEeaHourlyTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cams.load_eea_observations(folder, "both")
 
+    def test_local_day_follows_the_station_timezone(self):
+        # 15 June 00:00-23:00 CET is the local day of a UTC+01 station; a UTC+02 station
+        # needs 14 June 23:00 - 15 June 22:00 CET, a UTC station 15 June 01:00 - 16 June 00:00 CET.
+        frame = pd.concat([
+            _hourly_rows("ES/MAD", "2025-06-15 00:00", 24, value=10.0),
+            _hourly_rows("GR/ATH", "2025-06-14 23:00", 24, value=20.0),
+            _hourly_rows("PT/LIS", "2025-06-15 01:00", 24, value=30.0),
+        ], ignore_index=True)
+        offsets = pd.Series({"ES/MAD": 1, "GR/ATH": 2, "PT/LIS": 0})
+        with tempfile.TemporaryDirectory() as folder:
+            frame.to_parquet(os.path.join(folder, "obs.parquet"), index=False)
+            daily = cams.load_and_filter_eea_hourly(folder, day_definition="local", tz_offsets=offsets)
+            utc_daily = cams.load_and_filter_eea_hourly(folder)
+        self.assertEqual(len(daily), 3)
+        self.assertTrue((daily["day"] == pd.Timestamp("2025-06-15")).all())
+        self.assertEqual(dict(zip(daily["Samplingpoint"].astype(str), daily["daily_mean"])),
+                         {"ES/MAD": 10.0, "GR/ATH": 20.0, "PT/LIS": 30.0})
+        # On UTC days only the UTC station has a complete 15 June.
+        self.assertEqual(utc_daily["Samplingpoint"].astype(str).tolist(), ["PT/LIS"])
+
+    def test_local_day_drops_stations_without_timezone(self):
+        with tempfile.TemporaryDirectory() as folder:
+            _hourly_rows("XX/NOTZ", "2025-06-15 00:00", 24).to_parquet(os.path.join(folder, "obs.parquet"))
+            daily = cams.load_and_filter_eea_hourly(folder, day_definition="local", tz_offsets=pd.Series({"ES/A": 1}))
+        self.assertTrue(daily.empty)
+
+
+class LocalDayHelpersTest(unittest.TestCase):
+    def test_hourly_request_reaches_into_the_next_year(self):
+        self.assertTrue(cams.eea_request_body(["ES"], "PM10", "E1a", 2025, "hour")["dateTimeEnd"].startswith("2026-01-01"))
+        self.assertTrue(cams.eea_request_body(["ES"], "PM10", "E1a", 2025, "day")["dateTimeEnd"].startswith("2025-12-31"))
+
+    def test_product_tag_and_labels(self):
+        self.assertEqual(cams.product_tag("hour", "local"), "hour_local")
+        self.assertEqual(cams.product_tag("hour", "utc"), "hour")
+        self.assertEqual(cams.product_tag("day", "local"), "day")
+        frame = pd.DataFrame({"Samplingpoint": ["ES/A"], "day": [pd.Timestamp("2025-06-15")]})
+        combined = cams.combine_hourly_and_daily(frame, frame.assign(Samplingpoint="ES/B"), hourly_day="local")
+        self.assertEqual(combined["Samplingpoint"].tolist(),
+                         ["ES/A (hourly, station local day)", "ES/B (station local day)"])
+        import exceedance_report as er
+        self.assertEqual(er.base_station_id("ES/A (hourly, station local day)"), "ES/A")
+
+    def test_station_tz_offsets(self):
+        meta = pd.DataFrame({"Air Quality Station EoI Code": ["ES0001A", "GR0002A"],
+                             "Sampling Point Id": ["SP_1", "SP_2"], "Timezone": ["UTC+01", "UTC+02"]})
+        self.assertEqual(cams.station_tz_offsets(meta).to_dict(), {"ES/SP_1": 1, "GR/SP_2": 2})
+
+
+class PairingForProductTest(unittest.TestCase):
+    def _table(self, rows):
+        import pairing as pr
+        frame = pd.DataFrame(rows)
+        for col in pr.PAIRING_COLUMNS:
+            if col not in frame.columns:
+                frame[col] = None
+        return frame[pr.PAIRING_COLUMNS]
+
+    def test_reference_without_data_falls_back_to_the_product_default(self):
+        import pairing as pr
+        edited = self._table([
+            {"station_id": "AT/UB_DAY", "class": "UB", "paired_rb_id": "AT/RB_HOUR", "method": "option1", "source": "manual"},
+            {"station_id": "AT/UB_DAY2", "class": "UB", "paired_rb_id": "AT/RB_DAY", "method": "option1", "source": "default"},
+            {"station_id": "AT/RB_DAY", "class": "RB", "paired_rb_id": "AT/RB_DAY", "method": "option1", "source": "default"},
+            {"station_id": "AT/RB_HOUR", "class": "RB", "paired_rb_id": "AT/RB_HOUR", "method": "option1", "source": "default"},
+        ])
+        day_default = self._table([
+            {"station_id": "AT/UB_DAY", "class": "UB", "paired_rb_id": "AT/RB_DAY", "method": "option1", "source": "default"},
+            {"station_id": "AT/UB_DAY2", "class": "UB", "paired_rb_id": "AT/RB_DAY", "method": "option1", "source": "default"},
+            {"station_id": "AT/RB_DAY", "class": "RB", "paired_rb_id": "AT/RB_DAY", "method": "option1", "source": "default"},
+        ])
+        table, notes = pr.pairing_for_product(edited, day_default, ["AT/UB_DAY", "AT/UB_DAY2", "AT/RB_DAY"])
+        refs = dict(zip(table["station_id"], table["paired_rb_id"]))
+        self.assertEqual(refs, {"AT/UB_DAY": "AT/RB_DAY", "AT/UB_DAY2": "AT/RB_DAY", "AT/RB_DAY": "AT/RB_DAY"})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("AT/RB_HOUR", notes[0])
+
 
 class CamsUtcDailyTest(unittest.TestCase):
     def _grid(self):

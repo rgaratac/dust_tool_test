@@ -165,7 +165,8 @@ def eea_request_body(
         "pollutants": [pollutant],
         "dataset": EEA_DATASET_IDS.get(dataset_name, 2),
         "dateTimeStart": f"{year - 1}-12-14T00:00:00Z",
-        "dateTimeEnd": f"{year}-12-31T23:59:59Z",
+        # Hourly: a few hours into the next year, so 31 December is complete on every station's local day.
+        "dateTimeEnd": f"{year + 1}-01-01T03:00:00Z" if temporal_flag == "hour" else f"{year}-12-31T23:59:59Z",
         "aggregationType": temporal_flag,
         "email": "",
     }
@@ -578,15 +579,39 @@ def _eea_hourly_start_to_utc(start: pd.Series) -> pd.Series:
     return s.dt.tz_convert("UTC")
 
 
-def load_and_filter_eea_hourly(folder: str) -> pd.DataFrame:
-    """EEA hourly Parquet to UTC daily means, as the notebook's hourly branch does.
+HOURLY_DAYS = ("utc", "local")
+
+
+def station_tz_offsets(metadata: pd.DataFrame) -> pd.Series:
+    """Hours east of UTC per ``Samplingpoint`` from the ``Timezone`` column of DataExtract.csv."""
+    key = (
+        metadata["Air Quality Station EoI Code"].astype(str).str[:2]
+        + "/"
+        + metadata["Sampling Point Id"].astype(str)
+    )
+    offsets = pd.Series(metadata["Timezone"].map(parse_tz_offset).to_numpy(), index=key.to_numpy())
+    return offsets[~offsets.index.duplicated(keep="first")]
+
+
+def load_and_filter_eea_hourly(
+    folder: str, day_definition: str = "utc", tz_offsets: pd.Series | None = None,
+) -> pd.DataFrame:
+    """EEA hourly Parquet to daily means on a UTC day or on the station local day.
 
     Hourly ``Start`` is fixed UTC+1 (no daylight-saving time) and converted to
-    UTC; ``day`` is the UTC day. Validity 1, verification below 3, hourly
-    aggregation and non-negative values are kept, and only days with all 24
-    hourly values are returned. Columns: ``Pollutant``, ``day``,
-    ``Samplingpoint``, ``daily_mean``, ``n_hours``, ``unit``.
+    UTC. ``day_definition='utc'``: ``day`` is the UTC day. ``'local'``: each
+    hour is moved to the station's local standard time (UTC + ``tz_offsets``,
+    the ``Timezone`` of DataExtract.csv), so ``day`` covers 00:00-24:00 local,
+    the same window as the EEA daily product. Stations without an offset are
+    dropped in that case. Validity 1, verification below 3, hourly aggregation
+    and non-negative values are kept, and only days with all 24 hourly values
+    are returned. Columns: ``Pollutant``, ``day``, ``Samplingpoint``,
+    ``daily_mean``, ``n_hours``, ``unit``.
     """
+    if day_definition not in HOURLY_DAYS:
+        raise ValueError("day_definition must be 'utc' or 'local'.")
+    if day_definition == "local" and tz_offsets is None:
+        raise ValueError("tz_offsets (per Samplingpoint) are needed for the local day.")
     files = sorted(glob.glob(os.path.join(folder, "**", "*.parquet"), recursive=True))
     if not files:
         raise FileNotFoundError(
@@ -611,26 +636,42 @@ def load_and_filter_eea_hourly(folder: str) -> pd.DataFrame:
         & obs["AggType"].astype(str).str.lower().eq("hour")
         & (obs["Value"] >= 0)
     )
-    obs = obs.loc[mask, ["Pollutant", "Start", "Samplingpoint", "Value", "Unit"]]
-    obs["day"] = _eea_hourly_start_to_utc(obs["Start"]).dt.floor("D")
+    obs = obs.loc[mask, ["Pollutant", "Start", "Samplingpoint", "Value", "Unit"]].dropna(subset=["Samplingpoint"])
+    utc = _eea_hourly_start_to_utc(obs["Start"])
+    if day_definition == "utc":
+        obs["day"] = utc.dt.floor("D")
+    else:
+        # Look the offset up once per station rather than once per hourly row.
+        stations = obs["Samplingpoint"].astype("category")
+        lookup = pd.Series(stations.cat.categories.astype(str)).map(tz_offsets).to_numpy(dtype=float)
+        offset = pd.Series(lookup[stations.cat.codes.to_numpy()], index=obs.index)
+        unknown = obs.loc[offset.isna(), "Samplingpoint"].astype(str).unique()
+        if len(unknown):
+            print(f"{len(unknown)} station(s) without a Timezone in the metadata are dropped: {list(unknown)[:10]}")
+        local = utc.dt.tz_localize(None) + pd.to_timedelta(offset, unit="h")
+        obs["day"] = local.dt.floor("D")
+        obs = obs.dropna(subset=["day"])
     daily = (
         obs.groupby(["Pollutant", "day", "Samplingpoint"], sort=True, observed=True)
         .agg(daily_mean=("Value", "mean"), n_hours=("Value", "count"), unit=("Unit", "first"))
         .reset_index()
     )
-    # Only full 24-hour days, so every daily mean covers the whole UTC day.
+    # Only full 24-hour days, so every daily mean covers the whole day.
     daily = daily[daily["n_hours"] == 24].reset_index(drop=True)
     daily["daily_mean"] = daily["daily_mean"].astype("float32")
-    print(f"EEA hourly -> UTC daily rows: {len(daily):,} ({daily['Samplingpoint'].nunique()} stations)")
+    label = "UTC" if day_definition == "utc" else "station local"
+    print(f"EEA hourly -> {label} daily rows: {len(daily):,} ({daily['Samplingpoint'].nunique()} stations)")
     del obs
     gc.collect()
     return daily
 
 
-def load_eea_observations(folder: str, temporal_flag: str) -> pd.DataFrame:
-    """Daily EEA table for one product: UTC days for ``hour``, station local days for ``day``."""
+def load_eea_observations(
+    folder: str, temporal_flag: str, hourly_day: str = "utc", tz_offsets: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Daily EEA table for one product: ``hour`` on the UTC or local day (``hourly_day``), ``day`` on the local day."""
     if temporal_flag == "hour":
-        return load_and_filter_eea_hourly(folder)
+        return load_and_filter_eea_hourly(folder, day_definition=hourly_day, tz_offsets=tz_offsets)
     if temporal_flag == "day":
         return load_and_filter_eea_daily(folder, temporal_flag="day")
     raise ValueError("temporal_flag must be 'hour' or 'day'.")
@@ -1662,19 +1703,29 @@ DAY_DEFINITION = {
     "hour": "UTC day",
     "day": "station local day",
 }
+HOURLY_LOCAL_DAY_DEFINITION = "hourly, station local day"
 
 
-def tag_resolution(df: pd.DataFrame, temporal_flag: str) -> pd.DataFrame:
+def product_tag(temporal_flag: str, hourly_day: str = "utc") -> str:
+    """Name used in output files: ``hour``, ``hour_local`` or ``day``."""
+    return "hour_local" if temporal_flag == "hour" and hourly_day == "local" else temporal_flag
+
+
+def tag_resolution(df: pd.DataFrame, temporal_flag: str, hourly_day: str = "utc") -> pd.DataFrame:
     """Mark which EEA product a deduction table came from.
 
-    ``hour`` means ``day`` is a UTC day. ``day`` means ``day`` is the station's
-    local calendar date. The two labels are not the same 24-hour window.
+    ``hour`` means ``day`` is a UTC day, or the station's local day with
+    ``hourly_day='local'``. ``day`` means ``day`` is the station's local
+    calendar date.
     """
     if temporal_flag not in DAY_DEFINITION:
         raise ValueError("temporal_flag must be 'hour' or 'day'.")
     out = df.copy()
     out["eea_resolution"] = temporal_flag
-    out["day_definition"] = DAY_DEFINITION[temporal_flag]
+    out["day_definition"] = (
+        HOURLY_LOCAL_DAY_DEFINITION if temporal_flag == "hour" and hourly_day == "local"
+        else DAY_DEFINITION[temporal_flag]
+    )
     return out
 
 
@@ -1683,21 +1734,21 @@ def combine_hourly_and_daily(
     daily: pd.DataFrame,
     *,
     label_stations: bool = True,
+    hourly_day: str = "utc",
 ) -> pd.DataFrame:
     """Stack the hourly and daily deduction tables for plotting.
 
-    Rows are concatenated. They are not joined on ``day``, because that column
-    is a UTC day in ``hourly`` and a station-local day in ``daily``. With
-    ``label_stations``, ``Samplingpoint`` gains the clock in parentheses so a
-    map or time series keeps the two products apart. The original id stays in
-    ``Samplingpoint_id``.
+    Rows are concatenated, not joined on ``day``: EEA hourly and daily data come
+    from different sampling points. With ``label_stations``, ``Samplingpoint``
+    gains the product and clock in parentheses so a map or time series keeps
+    the two products apart. The original id stays in ``Samplingpoint_id``.
     """
     if hourly is None or hourly.empty:
         raise ValueError("The hourly deduction table is empty.")
     if daily is None or daily.empty:
         raise ValueError("The daily deduction table is empty.")
     frames = [
-        tag_resolution(hourly, "hour"),
+        tag_resolution(hourly, "hour", hourly_day),
         tag_resolution(daily, "day"),
     ]
     out = pd.concat(frames, ignore_index=True, sort=False)
@@ -1707,7 +1758,7 @@ def combine_hourly_and_daily(
     return out
 
 
-def load_and_combine_deduction_parquets(hourly_path: str, daily_path: str) -> pd.DataFrame:
+def load_and_combine_deduction_parquets(hourly_path: str, daily_path: str, hourly_day: str = "utc") -> pd.DataFrame:
     """Load the two saved deduction Parquet files and stack them."""
     missing = [path for path in (hourly_path, daily_path) if not os.path.isfile(path)]
     if missing:
@@ -1717,11 +1768,12 @@ def load_and_combine_deduction_parquets(hourly_path: str, daily_path: str) -> pd
         )
     hourly = pd.read_parquet(hourly_path)
     daily = pd.read_parquet(daily_path)
-    combined = combine_hourly_and_daily(hourly, daily)
+    combined = combine_hourly_and_daily(hourly, daily, hourly_day=hourly_day)
+    hourly_clock = "UTC day" if hourly_day == "utc" else "station local day"
     print(
         f"Combined {len(hourly):,} hourly rows and {len(daily):,} daily rows "
         f"into {len(combined):,} rows. "
-        "The hourly `day` is a UTC day; the daily `day` is the station local day."
+        f"The hourly `day` is a {hourly_clock}; the daily `day` is the station local day."
     )
     return combined
 

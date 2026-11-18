@@ -620,6 +620,36 @@ def load_pairing(
     return default.copy(), None
 
 
+def pairing_for_product(
+    table: pd.DataFrame, product_default: pd.DataFrame, station_ids,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Pairing for one data product (e.g. EEA hourly or daily) whose stations are ``station_ids``.
+
+    ``table`` is the pairing that is shown and edited for all products together.
+    Each station of the product keeps its row when the reference its method
+    uses (the RB for option1, the UB for option2_ub_paired) has data in this
+    product; otherwise the row of ``product_default``, the default pairing built
+    from this product's stations only, is used. Returns the table and one
+    message per manual pairing that could not be used.
+    """
+    ids = set(map(str, station_ids))
+    default = product_default.set_index("station_id")
+    rows, notes = [], []
+    for _, row in table[table["station_id"].astype(str).isin(ids)].iterrows():
+        ref = {"option1": row["paired_rb_id"], "option2_ub_paired": row["paired_ub_id"]}.get(row["method"])
+        ref = _clean_id(ref)
+        if ref is None or ref in ids or row["station_id"] not in default.index:
+            rows.append(row)
+            continue
+        if row.get("source") == "manual":
+            notes.append(f"{row['station_id']}: reference {ref} has no data in this product; default pairing used.")
+        replacement = default.loc[row["station_id"]].copy()
+        replacement["station_id"] = row["station_id"]
+        rows.append(replacement)
+    out = pd.DataFrame(rows).reindex(columns=PAIRING_COLUMNS) if rows else pd.DataFrame(columns=PAIRING_COLUMNS)
+    return out.reset_index(drop=True), notes
+
+
 def method_counts(table: pd.DataFrame) -> pd.DataFrame:
     """Stations per class and method, for a quick overview."""
     return (
