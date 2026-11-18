@@ -46,19 +46,17 @@ class SimplifiedToolTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             _write_metadata(tmp)
             settings = dt.Settings(year=2025, pollutant="PM10", countries=["ES"], temporal_flag="day",
-                                   load_parquet=False, project_dir=tmp, use_google_drive=False)
+                                   first_run=True, project_dir=tmp, use_google_drive=False)
             tool = dt.DustTool(settings)
             self.assertEqual((tool.daily_limit, tool.annual_limit), (45, 20))
+            self.assertEqual(tool.plan, dt.RunPlan(download_eea=True, download_cams=True,
+                                                   compute_cams_daily=True, load_parquet=False))
 
             tool.df = _observations(2025)
             tool.build_pairing()
             self.assertEqual(len(tool.pairing_session.table), 3)
-            tool.flag_dust_days()
-            tool.run_deduction()
-            tool.deduction_summary()
-            tool.save_or_load()
+            table = tool.compute_results(save_csv=True)
             self.assertTrue(os.path.exists(tool.deduction_parquet))
-            table = tool.make_station_table(save_csv=True)
             self.assertEqual(len(table), 3)
 
             exc = dp.exceedance_map_table(table, tool.df_target_year, ["ES"], tool.daily_limit)
@@ -68,12 +66,24 @@ class SimplifiedToolTest(unittest.TestCase):
             stations, report, _ = dp.station_compliance_tables(tool, 18)
             self.assertEqual(len(report), 3)
 
-            # Loading the saved Parquet again gives the same station table.
-            settings.load_parquet = True
+            # Later run: the saved Parquet is found, so the data steps are skipped.
+            settings.first_run = False
             loaded = dt.DustTool(settings)
+            self.assertTrue(loaded.plan.load_parquet)
+            self.assertFalse(loaded.plan.download_eea or loaded.plan.download_cams)
+            loaded.prepare_data()
             loaded.build_pairing()
-            loaded.save_or_load()
-            pd.testing.assert_frame_equal(loaded.make_station_table(save_csv=False), table)
+            pd.testing.assert_frame_equal(loaded.compute_results(save_csv=False), table)
+
+    def test_later_run_without_saved_results(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            tool = dt.DustTool(dt.Settings(first_run=False, project_dir=tmp, use_google_drive=False))
+            self.assertEqual(tool.plan, dt.RunPlan(False, False, False, False))
+            # An explicit switch wins over first_run.
+            tool = dt.DustTool(dt.Settings(first_run=False, download_eea=True, project_dir=tmp,
+                                           use_google_drive=False))
+            self.assertTrue(tool.plan.download_eea)
+            self.assertFalse(tool.plan.load_parquet)
 
     def test_bad_pairing_mode(self):
         with self.assertRaises(ValueError):

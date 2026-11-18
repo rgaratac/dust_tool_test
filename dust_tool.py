@@ -13,6 +13,9 @@ import gc
 import glob
 import importlib.util
 import os
+import subprocess
+import sys
+import urllib.request
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -35,6 +38,8 @@ except ImportError:  # plain Python: print instead
 ALL_COUNTRIES = ["AD", "AL", "AT", "BA", "BE", "BG", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB",
                  "GR", "HR", "HU", "IE", "IS", "IT", "LT", "LU", "LV", "ME", "MK", "MT", "NL", "NO", "PL", "PT",
                  "RO", "RS", "SE", "SI", "SK", "XK"]
+# Station metadata used when no DataExtract.csv is found in the project or output folder.
+METADATA_URL = "https://raw.githubusercontent.com/rgaratac/dust_tool_test/main/Data/DataExtract.csv"
 
 
 def in_colab() -> bool:
@@ -46,22 +51,30 @@ def in_colab() -> bool:
 
 @dataclass
 class Settings:
-    """All user options of the notebook (sections 2 and 3)."""
+    """All user options of the notebook."""
 
+    # True: download and compute everything. False: reuse the saved data and results.
+    first_run: bool = True
     # Selection
     year: int = 2025
     pollutant: str = "PM10"                 # 'PM10' or 'PM2.5'
     dataset: str = "E1a"                    # 'E1a' (verified) or 'E2a' (up-to-date)
     temporal_flag: str = "day"              # 'hour' or 'day'
     countries: list = field(default_factory=lambda: ["ES"])
-    # Run switches
-    download_eea: bool = False
-    download_cams: bool = False
-    compute_cams_daily: bool = False
-    load_parquet: bool = True
+    # Run switches; None: chosen from first_run and the files already saved (see DustTool.plan)
+    download_eea: bool | None = None
+    download_cams: bool | None = None
+    compute_cams_daily: bool | None = None
+    load_parquet: bool | None = None
     project_dir: str = "."
     use_google_drive: bool | None = None    # None: on in Colab, off locally
     var: str = "dust"
+    # Own observations instead of the EEA download (files in the output folder)
+    own_observations: bool = False
+    observations_file: str = "user_observations.csv"   # EEA observation layout
+    stations_file: str = "user_stations.csv"           # DataExtract.csv layout
+    upload_own_files: bool = False                     # Colab: choose the files on your computer
+    own_label: str = "user"                            # replaces the dataset name in the output file names
     # Dust flag, limit values and coverage
     cams_dust_threshold: float = 5
     pm10_daily_limit: float = 45
@@ -190,6 +203,14 @@ def setup_cds_key() -> None:
     print(f"Success! .cdsapirc has been created at {path}")
 
 
+@dataclass
+class RunPlan:
+    download_eea: bool
+    download_cams: bool
+    compute_cams_daily: bool
+    load_parquet: bool
+
+
 class DustTool:
     """Holds the settings and the tables of one run; one method per notebook step."""
 
@@ -197,24 +218,14 @@ class DustTool:
         s = self.settings = settings
         if s.pairing_mode not in ("default", "none"):
             raise ValueError("pairing_mode must be 'default' or 'none'")
+        if s.temporal_flag not in ("hour", "day"):
+            raise ValueError("temporal_flag must be 'hour' or 'day'")
         self.in_colab = in_colab()
         use_drive = self.in_colab if s.use_google_drive is None else s.use_google_drive
         self.output_dir, self.use_google_drive = cams_daily.resolve_output_dirs(s.project_dir, use_drive and self.in_colab)
         os.makedirs(self.output_dir, exist_ok=True)
-        print(f"Output folder: {os.path.abspath(self.output_dir)}")
-
-        # DOWNLOAD_CAMS brings new hourly files, so the daily product has to be rebuilt.
-        run = cams_daily.resolve_run_flags(
-            download_eea=s.download_eea, download_cams=s.download_cams,
-            compute_cams_daily=s.compute_cams_daily, load_parquet=s.load_parquet,
-            eea_temporal_flag=s.temporal_flag,
-        )
-        s.download_eea, s.download_cams = run["download_eea"], run["download_cams"]
-        s.compute_cams_daily, s.load_parquet = run["compute_cams_daily"], run["load_parquet"]
-        for note in run["notes"]:
-            print(note)
-        print("EEA daily data: CAMS daily means use each station's local day." if run["local_day"]
-              else "EEA hourly data: CAMS daily means use UTC days.")
+        self.dataset = s.own_label if s.own_observations else s.dataset
+        self.plan = self._make_plan()
 
         self.limits = nc.LimitValues(s.pm10_daily_limit, s.pm25_daily_limit, s.pm10_annual_limit, s.pm25_annual_limit)
         self.daily_limit = self.limits.daily(s.pollutant)
@@ -228,10 +239,6 @@ class DustTool:
             percentile=s.reference_percentile, min_reference_days_option1=s.min_reference_days_option1,
             min_reference_days_option2=s.min_reference_days_option2,
         )
-        print(f"{s.pollutant}: daily limit {self.daily_limit} µg/m3, annual limit {self.annual_limit} µg/m3")
-        print(f"Pairing mode: {s.pairing_mode}")
-
-        self.dataset = s.dataset  # replaced by the user label with own observations
         self.eea_folder = cams_daily.eea_extract_dir(s.project_dir, s.pollutant, s.year, s.dataset, s.temporal_flag)
         self.user_station_metadata = None
         self.use_user_observations = False
@@ -244,27 +251,88 @@ class DustTool:
         self.pairing_metadata = None
         self.df_target_year = None
         self.station_table = None
+        print(f"{s.pollutant} {s.year}, {', '.join(s.countries)}, {self.dataset}, EEA '{s.temporal_flag}' data. "
+              f"Limit values: daily {self.daily_limit} µg/m³, annual {self.annual_limit} µg/m³.")
 
-    # ---------- section 3: data ----------
+    # ---------- run plan ----------
+    def _make_plan(self) -> RunPlan:
+        """Download/compute/load switches: explicit settings win, None follows first_run and the saved files."""
+        s = self.settings
+        saved = os.path.exists(cams_daily.find_deduction_parquet(
+            self.output_dir, s.pollutant, self.dataset, s.temporal_flag, s.year))
+        eea_zip = os.path.exists(cams_daily.eea_zip_path(
+            self.output_dir, s.pollutant, s.temporal_flag, s.dataset, s.year))
+        utc_grid = os.path.exists(os.path.join(self.output_dir, f"IRA_{s.var}", f"cams_dust_{s.year}_daily_mean.nc"))
+        if s.first_run:
+            auto = dict(download_eea=not (eea_zip or s.own_observations), download_cams=True,
+                        compute_cams_daily=True, load_parquet=False)
+        else:
+            auto = dict(download_eea=False, download_cams=False,
+                        compute_cams_daily=not saved and s.temporal_flag == "hour" and not utc_grid,
+                        load_parquet=saved)
+        chosen = {k: auto[k] if getattr(s, k) is None else bool(getattr(s, k)) for k in auto}
+        # New downloads or a new daily CAMS product cannot be skipped by loading the old results.
+        run = cams_daily.resolve_run_flags(**chosen, eea_temporal_flag=s.temporal_flag)
+        plan = RunPlan(*(run[k] for k in ("download_eea", "download_cams", "compute_cams_daily", "load_parquet")))
+
+        parquet = cams_daily.find_deduction_parquet(self.output_dir, s.pollutant, self.dataset, s.temporal_flag, s.year)
+        print(f"Output folder: {os.path.abspath(self.output_dir)}")
+        if plan.load_parquet:
+            print(f"Saved results found: {os.path.basename(parquet)}\n"
+                  "-> The data steps are skipped; go straight to the pairing and the results.")
+        else:
+            if not s.first_run and not saved:
+                print(f"No saved results for this selection ({os.path.basename(parquet)}): they are computed from "
+                      "the files already downloaded. If files are missing, set first_run = True.")
+            steps = ["own observations" if s.own_observations
+                     else "download EEA" if plan.download_eea else "reuse the saved EEA download",
+                     "download missing CAMS files" if plan.download_cams else "reuse the saved CAMS files",
+                     "compute daily CAMS dust" if plan.compute_cams_daily else "reuse the daily CAMS dust",
+                     "compute and save the results"]
+            print("Run plan: " + " -> ".join(steps))
+        return plan
+
+    # ---------- section 2: data ----------
+    def prepare_data(self) -> None:
+        """Download, read and match the observations and CAMS dust; skipped when saved results are loaded."""
+        s = self.settings
+        if s.own_observations:
+            self.load_user_observations()
+        if self.plan.load_parquet:
+            print("Saved results are used: nothing to download or compute. Continue with the pairing.")
+            return
+        if not s.own_observations:
+            self.download_eea()
+        self._metadata_path()
+        if self.plan.download_cams and self._missing_cams_zips():
+            if importlib.util.find_spec("cdsapi") is None:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "cdsapi>=0.7.7"])
+            setup_cds_key()
+        self.download_cams()
+        self.prepare_observations()
+        self.match_cams()
+        print(f"Data ready: {self.df['Samplingpoint'].nunique()} stations, {len(self.df):,} station-days.")
+
+    def _missing_cams_zips(self) -> list:
+        s = self.settings
+        return [c["filename"] for c in cams_daily.cams_download_plan(s.year)
+                if not any(os.path.isfile(os.path.join(d, f"IRA_{s.var}", c["filename"]))
+                           for d in (self.output_dir, s.project_dir))]
+
     def download_eea(self) -> None:
         s = self.settings
         self.eea_folder = cams_daily.download_or_extract_eea(
             s.project_dir, self.output_dir, s.countries, s.pollutant, s.dataset, s.year,
-            s.temporal_flag, download=s.download_eea,
+            s.temporal_flag, download=self.plan.download_eea,
         )
 
-    def load_user_observations(self, enabled=False, observations_file="user_observations.csv",
-                               stations_file="user_stations.csv", upload=False, label="user") -> None:
-        """Use your own observations (section 3.1.1) instead of the EEA download."""
-        self.use_user_observations = enabled
-        self.user_station_metadata = None
-        if not enabled:
-            print("Using the EEA observations.")
-            return
+    def load_user_observations(self) -> None:
+        """Read your own observations and stations instead of the EEA download."""
         s = self.settings
-        obs_path = os.path.join(self.output_dir, observations_file)
-        stations_path = os.path.join(self.output_dir, stations_file)
-        if upload:
+        self.use_user_observations = True
+        obs_path = os.path.join(self.output_dir, s.observations_file)
+        stations_path = os.path.join(self.output_dir, s.stations_file)
+        if s.upload_own_files:
             print("Choose the observations file:")
             pv.upload_file(obs_path)
             print("Choose the stations file:")
@@ -274,43 +342,42 @@ class DustTool:
             examples = cams_daily.write_user_templates(self.output_dir, s.temporal_flag, s.pollutant)
             raise FileNotFoundError(
                 "Not found: " + ", ".join(missing) + "\nExample files were written to:\n  " + "\n  ".join(examples)
-                + f"\nFill them in, save them as {observations_file} and {stations_file} and run this cell again."
+                + f"\nFill them in, save them as {s.observations_file} and {s.stations_file} and run this cell again."
             )
         self.user_station_metadata = cams_daily.load_user_stations(stations_path, s.pollutant)
         print(f"{len(self.user_station_metadata)} stations read from {stations_path}")
-        if not s.load_parquet:
+        if not self.plan.load_parquet:
             self.daily_obs = cams_daily.load_user_observations(
                 obs_path, self.user_station_metadata, temporal_flag=s.temporal_flag, pollutant=s.pollutant,
             )
-            display(self.daily_obs.head())
-        self.dataset = label
-        print(f"Using your own observations; output files are labelled {label!r}.")
+        print(f"Using your own observations; output files are labelled {self.dataset!r}.")
 
     def download_cams(self) -> None:
         s = self.settings
-        if s.download_cams and importlib.util.find_spec("cdsapi") is None:
-            raise ImportError('Install cdsapi first: %pip install "cdsapi>=0.7.7"')
-        if s.download_cams or s.compute_cams_daily:
+        if self.plan.download_cams or self.plan.compute_cams_daily:
             # Zips stay in the output folder. Hourly NetCDF is extracted locally for this run only.
             cams_daily.download_and_extract_cams(
                 s.project_dir, self.output_dir, s.year, s.var,
-                download=s.download_cams, extract=s.compute_cams_daily,
+                download=self.plan.download_cams, extract=self.plan.compute_cams_daily,
             )
-        else:
-            print("compute_cams_daily is False. Zips are not extracted; the saved daily CAMS file is used later.")
 
-    # ---------- section 4: data preparation ----------
     def _metadata_path(self):
+        """DataExtract.csv from the output or project folder, else the repository copy (None with own stations only)."""
+        s = self.settings
         candidates = [os.path.join(self.output_dir, "DataExtract.csv"),
-                      os.path.join(self.settings.project_dir, "DataExtract.csv"),
-                      os.path.join(self.settings.project_dir, "Data", "DataExtract.csv")]
-        return next((p for p in candidates if os.path.exists(p)), None), candidates
+                      os.path.join(s.project_dir, "DataExtract.csv"),
+                      os.path.join(s.project_dir, "Data", "DataExtract.csv")]
+        path = next((p for p in candidates if os.path.exists(p)), None)
+        if path is None and self.user_station_metadata is None:
+            path = candidates[0]
+            print(f"DataExtract.csv not found; downloading the station metadata to {path}")
+            urllib.request.urlretrieve(METADATA_URL, path)
+        return path
 
     def prepare_observations(self) -> None:
-        """Validity filter, daily means, coverage filter and station coordinates (sections 4.1-4.3)."""
+        """Validity filter, daily means, coverage filter and station coordinates."""
         s = self.settings
-        if s.load_parquet:
-            print("load_parquet is True: the saved results are loaded in section 7.")
+        if self.plan.load_parquet:
             return
         if not self.use_user_observations:
             if s.temporal_flag == "hour":
@@ -325,30 +392,25 @@ class DustTool:
         df["Exceedance"] = df["daily_mean"] > self.daily_limit
         print(f"Stations with at least {s.station_coverage}% coverage in {s.year}: {df['Samplingpoint'].nunique()}")
 
-        metadata_path, candidates = self._metadata_path()
-        if metadata_path or self.user_station_metadata is not None:
-            # Stations from the user stations file come first and replace DataExtract.csv rows.
-            metadata = cams_daily.combine_station_metadata(metadata_path, self.user_station_metadata)
-            metadata["Samplingpoint"] = metadata["Air Quality Station EoI Code"].str[:2] + "/" + metadata["Sampling Point Id"]
-            geo = metadata[["Samplingpoint", "Longitude", "Latitude", "Altitude", "Timezone"]].drop_duplicates("Samplingpoint")
-            df = df.merge(geo, on="Samplingpoint", how="left")
-            print(f"Metadata merged from: {metadata_path or 'the user stations file'}")
-            if self.use_user_observations:
-                no_coords = df.loc[df["Latitude"].isna(), "Samplingpoint"].unique()
-                if len(no_coords):
-                    print(f"{len(no_coords)} station(s) without coordinates are dropped: {list(no_coords)[:10]}")
-                    df = df.dropna(subset=["Latitude", "Longitude"])
-        else:
-            print(f"Warning: DataExtract.csv not found in {candidates}. Skipping spatial merge.")
+        # Stations from the user stations file come first and replace DataExtract.csv rows.
+        metadata = cams_daily.combine_station_metadata(self._metadata_path(), self.user_station_metadata)
+        metadata["Samplingpoint"] = metadata["Air Quality Station EoI Code"].str[:2] + "/" + metadata["Sampling Point Id"]
+        geo = metadata[["Samplingpoint", "Longitude", "Latitude", "Altitude", "Timezone"]].drop_duplicates("Samplingpoint")
+        df = df.merge(geo, on="Samplingpoint", how="left")
+        no_coords = df.loc[df["Latitude"].isna(), "Samplingpoint"].unique()
+        if len(no_coords):
+            print(f"{len(no_coords)} station(s) without coordinates are dropped: {list(no_coords)[:10]}")
+            df = df.dropna(subset=["Latitude", "Longitude"])
         self.df_processed = df
 
     def match_cams(self) -> None:
-        """Daily CAMS dust at each station (sections 4.4-4.5): UTC days for hourly data, local days for daily data."""
+        """Daily CAMS dust at each station: UTC days for hourly data, local days for daily data."""
         s = self.settings
-        if s.load_parquet:
+        if self.plan.load_parquet:
             return
         if s.temporal_flag == "hour":
-            self.daily_cams = cams_utc_daily_grid(s.project_dir, self.output_dir, s.year, s.var, s.compute_cams_daily)
+            self.daily_cams = cams_utc_daily_grid(s.project_dir, self.output_dir, s.year, s.var,
+                                                  self.plan.compute_cams_daily)
             if self.daily_cams is None:
                 raise FileNotFoundError("No daily CAMS grid: run with compute_cams_daily=True.")
             lat, lon = self.daily_cams.lat, self.daily_cams.lon
@@ -367,10 +429,9 @@ class DustTool:
             print(f"CAMS files for local-day means: {len(nc_files)}")
             self.df = cams_daily.add_cams_local_daily_dust(
                 nc_files, self.df_processed, var_name=s.var, buffer=0.2, cache_dir=self.output_dir,
-                reuse_cache=True, recompute_daily=bool(s.compute_cams_daily), min_hours=18,
+                reuse_cache=True, recompute_daily=self.plan.compute_cams_daily, min_hours=18,
                 time_col="day", year=s.year,
             )
-        display(self.df.head())
 
     # ---------- section 4.6: pairing ----------
     @property
@@ -381,17 +442,15 @@ class DustTool:
     def deduction_parquet(self) -> str:
         s = self.settings
         # When loading, a file saved by an earlier version (name ending in _MA6) is used if the new name is missing.
-        find = cams_daily.find_deduction_parquet if s.load_parquet else cams_daily.deduction_parquet_path
+        find = cams_daily.find_deduction_parquet if self.plan.load_parquet else cams_daily.deduction_parquet_path
         return find(self.output_dir, s.pollutant, self.dataset, s.temporal_flag, s.year)
 
     def build_pairing(self) -> None:
         s = self.settings
-        metadata_path, candidates = self._metadata_path()
-        if metadata_path is None and self.user_station_metadata is None:
-            raise FileNotFoundError(f"DataExtract.csv not found in {candidates}")
+        metadata_path = self._metadata_path()
 
         # Only stations with data can be references: this run's stations, or those in the saved Parquet.
-        if not s.load_parquet:
+        if not self.plan.load_parquet:
             station_ids = self.df["Samplingpoint"].astype(str).unique()
         elif os.path.exists(self.deduction_parquet):
             station_ids = pd.read_parquet(self.deduction_parquet, columns=["Samplingpoint"])["Samplingpoint"].astype(str).unique()
@@ -430,7 +489,6 @@ class DustTool:
             autosave_path=self.pairing_user_path if s.pairing_mode == "default" else None,
         )
         display(pr.method_counts(self.pairing_session.table))
-        display(self.pairing_session.table.head())
 
     def pairing_app(self, clickable_map=True):
         return pv.pairing_app(self.pairing_session, countries=self.settings.countries, clickable_map=clickable_map)
@@ -456,32 +514,42 @@ class DustTool:
         display(report.changes)
         display(pr.method_counts(self.pairing_session.table))
 
-    # ---------- sections 5-6: dust days and deduction ----------
+    # ---------- section 4: dust days, deduction and results ----------
+    def compute_results(self, save_csv=True) -> pd.DataFrame:
+        """Dust days, deduction, summary, save (or load) and the station table."""
+        if not self.plan.load_parquet:
+            self.flag_dust_days()
+            self.run_deduction()
+            self.deduction_summary()
+        self.save_or_load()
+        table = self.make_station_table(save_csv)
+        if self.settings.first_run and not self.plan.load_parquet:
+            print("\nResults saved. Next time set first_run = False to skip the downloads and go straight "
+                  "to the pairing and the results.")
+        return table
+
     def flag_dust_days(self) -> None:
-        if self.settings.load_parquet:
+        if self.plan.load_parquet:
             return
         self.df["dust_flag"] = self.df["cams_dust"] > self.settings.cams_dust_threshold
         self.df["Exceedance"] = self.df["daily_mean"] > self.daily_limit
-        display(self.df.head())
-        negative = self.df[self.df["daily_mean"] < 0]
-        print(f"Rows with negative daily_mean: {len(negative)}")
-        if not negative.empty:
-            display(negative.sort_values("daily_mean").head(10))
+        negative = int((self.df["daily_mean"] < 0).sum())
+        if negative:
+            print(f"Rows with negative daily_mean: {negative}")
 
     def run_deduction(self) -> None:
         s = self.settings
-        if s.load_parquet:
+        if self.plan.load_parquet:
             return
         self.df_target_year = nc.run_natural_deduction(
             self.df, self.pairing_session.table, s.year, pollutant=s.pollutant,
             dust_threshold=s.cams_dust_threshold, params=self.params, limits=self.limits,
         )
         gc.collect()
-        display(self.df_target_year[nc.NEW_COLUMNS].head())
 
     def deduction_summary(self) -> None:
-        """Event days per class and method, and the unconfirmed dust days (section 6.1)."""
-        if self.settings.load_parquet:
+        """Event days per class and method, and the unconfirmed dust days."""
+        if self.plan.load_parquet:
             return
         d = self.df_target_year
         display(
@@ -504,7 +572,7 @@ class DustTool:
     def save_or_load(self) -> None:
         s = self.settings
         path = self.deduction_parquet
-        if not s.load_parquet:
+        if not self.plan.load_parquet:
             self.df_target_year.to_parquet(path, compression="snappy")
             print(f"Saved {path}")
         else:
@@ -537,7 +605,7 @@ class DustTool:
         """Share of CAMS dust days with a contribution > 0 per threshold, and the suggested threshold."""
         import dust_threshold_sensitivity as sens
 
-        sweep_input = self.df if not self.settings.load_parquet else self.df_target_year
+        sweep_input = self.df if not self.plan.load_parquet else self.df_target_year
         parts = []
         for threshold in thresholds:
             frame = nc.compute_natural_contribution(
