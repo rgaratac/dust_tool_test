@@ -47,6 +47,18 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # progress bars are optional
+    tqdm = None
+
+
+def progress(iterable, desc: str, total: int | None = None, leave: bool = True):
+    """Wrap ``iterable`` in a progress bar when tqdm is installed."""
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total, leave=leave)
+
 ############### USER INPUT ####################
 # Same knobs as Dust_discount_hourly.py / the notebook. Edit these to run
 # this file as a script. Importing the module does not download or compute.
@@ -471,7 +483,8 @@ def download_and_extract_cams(
         print(f"Hourly NetCDF for this run only: {extract_dir}")
 
     client = None
-    for config in cams_download_plan(year):
+    plan = cams_download_plan(year)
+    for config in progress(plan, desc="CAMS files", total=len(plan)):
         zip_file_path = stored_cams_zip(persistent_dir, project_dir, var, config["filename"])
         if download and not os.path.exists(zip_file_path):
             import cdsapi
@@ -985,7 +998,9 @@ def extract_hourly_at_stations(
         lon_da = xr.DataArray(stations["Longitude"].to_numpy(dtype="float64"), dims="station")
         times = pd.to_datetime(da[time_name].values)
         n_days = 0
-        for _day, positions in _iter_utc_days(times.to_numpy()):
+        n_total = len(np.unique(times.floor("D")))
+        days = _iter_utc_days(times.to_numpy())
+        for _day, positions in progress(days, desc=os.path.basename(nc_path), total=n_total, leave=False):
             sub = da.isel({time_name: np.asarray(positions, dtype=int)})
             if sub.dtype != np.float32:
                 sub = sub.astype("float32")
@@ -1185,7 +1200,7 @@ def _load_or_extract_hourly(
     station_col: str,
 ) -> pd.DataFrame:
     frames = []
-    for path in paths:
+    for path in progress(paths, desc="CAMS files at the stations", total=len(paths)):
         cache_file = None
         if cache_dir:
             cache_file = _cache_paths(cache_dir, tag, year=0, min_hours=0, source_name=path)
