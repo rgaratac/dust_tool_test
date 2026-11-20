@@ -500,8 +500,13 @@ def download_and_extract_cams(
                 "year": config["year"],
                 "month": config["month"],
             }
-            client.retrieve(CAMS_DATASET_NAME, request).download(zip_file_path)
+            # Download to a temporary name, so an interrupted download is not taken for a complete zip.
+            partial_path = zip_file_path + ".part"
+            client.retrieve(CAMS_DATASET_NAME, request).download(partial_path)
+            os.replace(partial_path, zip_file_path)
             print(f"Download Successful: {config['filename']}")
+        elif os.path.exists(zip_file_path):
+            print(f"CAMS zip already stored, not downloaded again: {config['filename']}")
 
         if not os.path.exists(zip_file_path):
             print(f"CAMS zip not found: {zip_file_path}. Set DOWNLOAD_CAMS=True to fetch it.")
