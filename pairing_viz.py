@@ -454,7 +454,12 @@ def pairing_editor_widget(session: PairingSession, *, export_path: str | None = 
         valid_ub = {v for _, v in ub_dd.options}
         ub_dd.value = row["paired_ub_id"] if row["paired_ub_id"] in valid_ub else _NONE
         ub_dd.disabled = row["class"] != "TH"
-        method_dd.value = "none" if row["method"] == "none" else ""
+        method_opts = [("auto (from pairing)", ""), ("none: exclude station from the deduction", "none")]
+        if row["class"] == "TH":
+            method_opts.append(("option2: self-calibration (manual exception)", "option2"))
+        method_dd.options = method_opts
+        th_self = row["class"] == "TH" and row["method"] == "option2"
+        method_dd.value = "none" if row["method"] == "none" else ("option2" if th_self else "")
         comment_box.value = str(row["comment"] or "")
         info.value = station_hover_text(dict(row) | {"station_id": station_id})
 

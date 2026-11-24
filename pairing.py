@@ -266,6 +266,9 @@ def resolve_method(station_class: str, paired_rb_id, paired_ub_id, requested=Non
         return "none", None
     if req == "option1" and not _clean_id(paired_rb_id):
         return derived, f"option1 needs a paired RB; using {derived}"
+    if req == "option2" and station_class == "TH":
+        # Allowed only when set by hand: the guidance does not foresee self-calibration at TH stations.
+        return "option2", "option2 self-calibration at a TH station is a manual exception to the guidance"
     if req == "option2" and station_class not in ("UB", "RB"):
         return derived, f"option2 self-calibration is only for UB/RB stations; using {derived}"
     if req == "option2_ub_paired" and not (station_class == "TH" and _clean_id(paired_ub_id)):

@@ -93,6 +93,18 @@ class DefaultPairingTest(unittest.TestCase):
         self.assertEqual(back.loc["ES/UB1", "paired_rb_id"], "ES/RB_OK")
         self.assertEqual(back.loc["ES/UB1", "source"], "default")
 
+    def test_th_self_calibration_as_manual_exception(self):
+        default = pr.default_pairing(self.stations)
+        edited, warnings = pr.set_manual_pair(
+            default, self.stations, "ES/TH1", rb_id=None, ub_id=None, method="option2"
+        )
+        row = edited.set_index("station_id").loc["ES/TH1"]
+        self.assertEqual(row["method"], "option2")
+        self.assertEqual(row["source"], "manual")
+        self.assertTrue(any("manual exception" in w for w in warnings))
+        plain, _ = pr.set_manual_pair(default, self.stations, "ES/TH1", rb_id=None, ub_id=None)
+        self.assertEqual(plain.set_index("station_id").loc["ES/TH1", "method"], "none")
+
     def test_no_pairing(self):
         table = pr.no_pairing(self.stations).set_index("station_id")
         self.assertEqual(table.loc["ES/RB_OK", "method"], "option1")

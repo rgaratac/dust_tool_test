@@ -18,8 +18,9 @@ Option 2 (self-calibration, UB without suitable RB)
     (start-3 .. start-1 and end+1 .. end+3, event days dropped) for every day
     of the episode.
 
-TH stations never self-calibrate. They take the Option 1 load of their RB or,
-without a suitable RB, the Option 2 load of their paired UB.
+TH stations do not self-calibrate by default. They take the Option 1 load of
+their RB or, without a suitable RB, the Option 2 load of their paired UB. A TH
+station set to ``option2`` by hand in the pairing self-calibrates as a manual exception.
 
 The pairing table (``pairing.py``) decides the method and reference station
 for each station, so editing the pairing changes the next run directly.
