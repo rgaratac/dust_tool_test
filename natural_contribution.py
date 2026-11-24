@@ -71,7 +71,7 @@ def _is_pm10(pollutant: str) -> bool:
 NEW_COLUMNS = [
     "station_class", "method", "reference_station_id", "reference_value",
     "n_reference_days", "natural_contribution", "cams_dust_flag",
-    "confirmed_dust_day", "adjusted_value", "insufficient_reference", "pairing_source",
+    "quantified_dust_day", "adjusted_value", "insufficient_reference", "pairing_source",
 ]
 
 
@@ -300,7 +300,7 @@ def compute_natural_contribution(
     work["reference_value"] = work["reference_value"].where(event).astype("float32")
     work["n_reference_days"] = work["n_reference_days"].where(event).fillna(0).astype("int16")
     work["insufficient_reference"] = (event & (work["method"] != "none") & load.isna()).astype(bool)
-    work["confirmed_dust_day"] = (event & (work["natural_contribution"] > 0)).astype(bool)
+    work["quantified_dust_day"] = (event & (work["natural_contribution"] > 0)).astype(bool)
 
     work["dust_flag"] = work["cams_dust_flag"]
     work["pollutant_median"] = work["reference_value"]
@@ -361,6 +361,9 @@ def station_indicators(
     ``Average_pollutant_dust_removed``) are kept for the existing maps.
     """
     work = daily.copy()
+    # Parquet files from earlier versions use the old column name.
+    if "quantified_dust_day" not in work.columns and "confirmed_dust_day" in work.columns:
+        work = work.rename(columns={"confirmed_dust_day": "quantified_dust_day"})
     measured = pd.to_numeric(work[value_col], errors="coerce")
     adjusted = pd.to_numeric(work["adjusted_value"], errors="coerce")
     work["_exc_meas"] = measured > daily_limit
@@ -370,7 +373,7 @@ def station_indicators(
     agg = {
         "n_days": ("_measured", "count"),
         "cams_dust_days": ("cams_dust_flag", "sum"),
-        "confirmed_dust_days": ("confirmed_dust_day", "sum"),
+        "quantified_dust_days": ("quantified_dust_day", "sum"),
         "insufficient_reference_days": ("insufficient_reference", "sum"),
         "exceedances_measured": ("_exc_meas", "sum"),
         "exceedances_adjusted": ("_exc_adj", "sum"),
@@ -397,7 +400,7 @@ def station_indicators(
 
     order = [station_col, "Latitude", "Longitude", "Altitude", "station_class", "method",
              "reference_station_id", "pairing_source", "n_days", "cams_dust_days",
-             "confirmed_dust_days", "insufficient_reference_days", "exceedances_measured",
+             "quantified_dust_days", "insufficient_reference_days", "exceedances_measured",
              "exceedances_adjusted", "exceedances_natural", "annual_mean_measured",
              "annual_mean_adjusted", "annual_limit_exceeded_measured",
              "annual_limit_exceeded_adjusted", "Exceedance_days", "Dust_exceedance_days",

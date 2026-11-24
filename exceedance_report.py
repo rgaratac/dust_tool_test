@@ -353,6 +353,6 @@ def plot_contribution_distribution(daily: pd.DataFrame, *, ax=None):
     ax.boxplot(data, showfliers=True, flierprops={"markersize": 2})
     ax.set_xticks(range(1, 13), ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"])
     ax.set_ylabel("Natural contribution (µg/m³)")
-    ax.set_title("Natural contribution on confirmed dust days, per month")
+    ax.set_title("Natural contribution on quantified dust days, per month")
     ax.grid(axis="y", alpha=0.3)
     return ax

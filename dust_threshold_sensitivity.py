@@ -422,13 +422,13 @@ def contribution_consistency(
         if group_col not in work.columns and group_col == "country":
             work["country"] = work[station_col].astype(str).str[:2]
         for group, sub in work.groupby(group_col, observed=True):
-            confirmed = sub["natural_contribution"] > 0
+            quantified = sub["natural_contribution"] > 0
             rows.append({
                 group_col: group,
                 "dust_threshold_ug_m3": threshold,
                 "cams_dust_days": int(len(sub)),
-                "confirmed_days": int(confirmed.sum()),
-                "share_confirmed": float(confirmed.mean()) if len(sub) else np.nan,
+                "quantified_days": int(quantified.sum()),
+                "share_quantified": float(quantified.mean()) if len(sub) else np.nan,
                 "median_contribution": float(sub["natural_contribution"].median()) if len(sub) else np.nan,
             })
     return pd.DataFrame(rows).sort_values([group_col, "dust_threshold_ug_m3"]).reset_index(drop=True)
@@ -441,7 +441,7 @@ def lowest_consistent_threshold(
     min_share: float = 0.9,
     min_days: int = 10,
 ) -> pd.DataFrame:
-    """Lowest threshold from which every higher threshold has ``share_confirmed >= min_share``.
+    """Lowest threshold from which every higher threshold has ``share_quantified >= min_share``.
 
     Thresholds with fewer than ``min_days`` CAMS dust days are ignored. The
     result is NaN for a group where no threshold qualifies.
@@ -450,16 +450,16 @@ def lowest_consistent_threshold(
     for group, sub in consistency.groupby(group_col):
         sub = sub[sub["cams_dust_days"] >= min_days].sort_values("dust_threshold_ug_m3")
         best = np.nan
-        ok = (sub["share_confirmed"] >= min_share).to_numpy()
+        ok = (sub["share_quantified"] >= min_share).to_numpy()
         for i in range(len(sub)):
             if ok[i:].all():
                 best = float(sub["dust_threshold_ug_m3"].iloc[i])
                 break
-        share = sub.loc[sub["dust_threshold_ug_m3"] == best, "share_confirmed"]
+        share = sub.loc[sub["dust_threshold_ug_m3"] == best, "share_quantified"]
         rows.append({
             group_col: group,
             "model_threshold_ug_m3": best,
-            "share_confirmed_at_threshold": float(share.iloc[0]) if len(share) else np.nan,
+            "share_quantified_at_threshold": float(share.iloc[0]) if len(share) else np.nan,
             "thresholds_tested": int(len(sub)),
         })
     return pd.DataFrame(rows)

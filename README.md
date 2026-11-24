@@ -148,9 +148,9 @@ Event days are the CAMS dust days (`cams_dust_flag`: CAMS dust above `CAMS_dust_
 
 With fewer valid reference days than `MIN_REFERENCE_DAYS_OPTION1` / `MIN_REFERENCE_DAYS_OPTION2`, the day is flagged `insufficient_reference` and nothing is subtracted.
 
-The contribution is subtracted on **every** event day, with or without an exceedance; other days get 0. `adjusted_value = measured − natural_contribution`, never below 0. A dust day is confirmed (`confirmed_dust_day`) only when the quantified contribution is > 0.
+The contribution is subtracted on **every** event day, with or without an exceedance; other days get 0. `adjusted_value = measured − natural_contribution`, never below 0. A dust day is a quantified dust day (`quantified_dust_day`) only when the quantified contribution is > 0.
 
-New daily columns: `station_class`, `method`, `reference_station_id`, `reference_value`, `n_reference_days`, `natural_contribution`, `cams_dust_flag`, `confirmed_dust_day`, `adjusted_value`, `insufficient_reference`, `pairing_source`. The previous names are kept for the plots: `dust_flag` = `cams_dust_flag`, `pollutant_median` = `reference_value`, `Dust_contribution` = `natural_contribution`, `corrected_pollutant` = `adjusted_value`.
+New daily columns: `station_class`, `method`, `reference_station_id`, `reference_value`, `n_reference_days`, `natural_contribution`, `cams_dust_flag`, `quantified_dust_day`, `adjusted_value`, `insufficient_reference`, `pairing_source`. The previous names are kept for the plots: `dust_flag` = `cams_dust_flag`, `pollutant_median` = `reference_value`, `Dust_contribution` = `natural_contribution`, `corrected_pollutant` = `adjusted_value`.
 
 **Model-specific dust threshold.** `dust_threshold_sensitivity.natural_threshold_sweep`, `contribution_consistency` and `lowest_consistent_threshold` recompute the deduction for a list of CAMS thresholds and report, per country or region, the lowest threshold from which the quantified contribution is > 0 on at least a given share of CAMS dust days. The notebook runs this in section 7.2.1 when `RUN_THRESHOLD_SWEEP = True`.
 
@@ -169,7 +169,7 @@ The adjusted daily series is summarised per station for the selected year (`natu
 | Column | Meaning |
 |---|---|
 | `station_class`, `method`, `reference_station_id`, `pairing_source` | Class, method and reference station used; default or manual pairing |
-| `cams_dust_days`, `confirmed_dust_days`, `insufficient_reference_days` | CAMS dust days, dust days with a contribution > 0, days without enough reference data |
+| `cams_dust_days`, `quantified_dust_days`, `insufficient_reference_days` | CAMS dust days, dust days with a contribution > 0, days without enough reference data |
 | `exceedances_measured`, `exceedances_adjusted` | Days above the daily limit before and after subtraction |
 | `exceedances_natural` | Exceedances attributed to natural sources |
 | `annual_mean_measured`, `annual_mean_adjusted` | Annual mean before and after subtraction |

@@ -254,7 +254,7 @@ class DeductionTest(unittest.TestCase):
         self.assertAlmostEqual(dust.loc["ES/UB", "natural_contribution"], 30.0)
         self.assertAlmostEqual(dust.loc["ES/UB", "adjusted_value"], 60.0)
         self.assertEqual(dust.loc["ES/UB", "reference_station_id"], "ES/RB")
-        self.assertTrue(dust["confirmed_dust_day"].all())
+        self.assertTrue(dust["quantified_dust_day"].all())
         self.assertEqual(out.loc[~out["cams_dust_flag"], "natural_contribution"].sum(), 0)
         again = nc.compute_natural_contribution(out, pairing, dust_threshold=5, params=self.params)
         pd.testing.assert_series_equal(again["adjusted_value"], out["adjusted_value"])
@@ -305,7 +305,7 @@ class DeductionTest(unittest.TestCase):
         )
         dust = out[out["cams_dust_flag"]].set_index("Samplingpoint")
         self.assertEqual(dust.loc["ES/UB", "natural_contribution"], 0)
-        self.assertFalse(dust.loc["ES/UB", "confirmed_dust_day"])
+        self.assertFalse(dust.loc["ES/UB", "quantified_dust_day"])
         self.assertTrue(dust.loc["ES/TH", "insufficient_reference"])
         self.assertEqual(dust.loc["ES/TH", "adjusted_value"], 1)
         self.assertTrue((out["adjusted_value"].dropna() >= 0).all())
@@ -323,7 +323,7 @@ class DeductionTest(unittest.TestCase):
         summary = nc.station_indicators(out, daily_limit=45, annual_limit=20).iloc[0]
         self.assertAlmostEqual(summary["annual_mean_measured"], np.mean(values), places=4)
         self.assertAlmostEqual(summary["annual_mean_adjusted"], 20.0, places=4)
-        self.assertEqual(summary["confirmed_dust_days"], 2)
+        self.assertEqual(summary["quantified_dust_days"], 2)
         self.assertTrue(summary["annual_limit_exceeded_measured"])
         self.assertFalse(summary["annual_limit_exceeded_adjusted"])
 
@@ -369,7 +369,7 @@ class ModelThresholdTest(unittest.TestCase):
         self.assertEqual(result["country"], "ES")
         self.assertEqual(result["model_threshold_ug_m3"], 5.0)
         low = table[table["dust_threshold_ug_m3"] == 3].iloc[0]
-        self.assertAlmostEqual(low["share_confirmed"], 0.5)
+        self.assertAlmostEqual(low["share_quantified"], 0.5)
 
 
 if __name__ == "__main__":
